@@ -219,7 +219,10 @@ class Database:
             'SELECT roblox_username, verified, verified_at, role FROM users WHERE telegram_id = ?', 
             (telegram_id,)
         )
-        return cursor.fetchone()
+        result = cursor.fetchone()
+        if result:
+            return result
+        return None
     
     def get_bot_stats(self):
         cursor = self.conn.cursor()
@@ -255,10 +258,12 @@ class Database:
         return False
     
     def is_admin(self, telegram_id):
+        """Проверяет является ли пользователь администратором"""
         role = self.get_role(telegram_id)
         return role in ['admin', 'owner']
     
     def is_owner(self, telegram_id):
+        """Проверяет является ли пользователь владельцем"""
         return self.get_role(telegram_id) == 'owner'
     
     def log_action(self, user_id, action, target_user_id=None, details=None):
@@ -342,7 +347,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /profile"""
     try:
-        await show_profile(update, update.effective_user)
+        user = update.effective_user
+        await show_profile(update, user)
     except Exception as e:
         logger.error(f"Error in profile_command: {e}")
         await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
@@ -350,6 +356,12 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /stats"""
     try:
+        user = update.effective_user
+        
+        if not db.is_admin(user.id):
+            await update.message.reply_text("❌ У вас нет прав для просмотра статистики.")
+            return
+        
         await show_stats(update)
     except Exception as e:
         logger.error(f"Error in stats_command: {e}")
@@ -1299,6 +1311,15 @@ async def show_admin_panel(update, user):
 async def show_stats(update):
     """Показывает статистику"""
     try:
+        user = update.effective_user if hasattr(update, 'effective_user') else update.from_user
+        
+        if not db.is_admin(user.id):
+            if hasattr(update, 'message'):
+                await update.message.reply_text("❌ У вас нет прав для просмотра статистики.")
+            else:
+                await update.edit_message_text("❌ У вас нет прав для просмотра статистики.")
+            return
+        
         stats = db.get_bot_stats()
         
         total = stats['total_users']
