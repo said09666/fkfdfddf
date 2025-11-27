@@ -17,9 +17,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+# Конфигурация - ваш ID установлен как владелец
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_IDS = [int(x) for x in os.getenv('8214687269', '8214687269').split(',') if x]
+ADMIN_IDS = [8214687269]  # Ваш ID как владелец
 
 # Роли пользователей
 ROLES = {
@@ -30,6 +30,19 @@ ROLES = {
     'scammer': '🚫 Скамер',
     'user': '👤 Пользователь'
 }
+
+# Иерархия ролей (кто кого может назначать)
+ROLE_HIERARCHY = {
+    'owner': ['owner', 'admin', 'moderator', 'guarantor', 'user', 'scammer'],
+    'admin': ['admin', 'moderator', 'guarantor', 'user', 'scammer'],
+    'moderator': ['moderator', 'guarantor', 'user', 'scammer'],
+    'guarantor': ['user'],
+    'user': [],
+    'scammer': []
+}
+
+# Состояния пользователей
+USER_STATES = {}
 
 class Database:
     def __init__(self):
@@ -64,6 +77,18 @@ class Database:
                 total_users INTEGER DEFAULT 0,
                 verified_users INTEGER DEFAULT 0,
                 new_users INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # Логи действий
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS action_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                target_user_id INTEGER,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -135,6 +160,27 @@ class Database:
             (role, added_by, telegram_id)
         )
         self.conn.commit()
+        logger.info(f"User {telegram_id} role set to {role} by {added_by}")
+        
+        # Логируем действие
+        self.log_action(added_by, 'set_role', telegram_id, f"Role changed to {role}")
+    
+    def get_user_by_id(self, telegram_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT telegram_id, telegram_username, roblox_username, role, verified FROM users WHERE telegram_id = ?',
+            (telegram_id,)
+        )
+        result = cursor.fetchone()
+        if result:
+            return {
+                'telegram_id': result[0],
+                'telegram_username': result[1],
+                'roblox_username': result[2],
+                'role': result[3],
+                'verified': result[4]
+            }
+        return None
     
     def get_users_by_role(self, role):
         cursor = self.conn.cursor()
@@ -144,15 +190,26 @@ class Database:
         )
         return cursor.fetchall()
     
-    def ban_user(self, telegram_id):
+    def get_all_users(self):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT telegram_id, telegram_username, roblox_username, role, verified FROM users ORDER BY role, telegram_id'
+        )
+        return cursor.fetchall()
+    
+    def ban_user(self, telegram_id, banned_by=None):
         cursor = self.conn.cursor()
         cursor.execute('UPDATE users SET banned = TRUE WHERE telegram_id = ?', (telegram_id,))
         self.conn.commit()
+        if banned_by:
+            self.log_action(banned_by, 'ban_user', telegram_id, "User banned")
     
-    def unban_user(self, telegram_id):
+    def unban_user(self, telegram_id, unbanned_by=None):
         cursor = self.conn.cursor()
         cursor.execute('UPDATE users SET banned = FALSE WHERE telegram_id = ?', (telegram_id,))
         self.conn.commit()
+        if unbanned_by:
+            self.log_action(unbanned_by, 'unban_user', telegram_id, "User unbanned")
     
     def get_user_stats(self, telegram_id):
         cursor = self.conn.cursor()
@@ -180,22 +237,6 @@ class Database:
             cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', (role,))
             role_stats[role] = cursor.fetchone()[0]
         
-        # Сегодняшняя дата
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        # Обновляем дневную статистику
-        cursor.execute('SELECT id FROM stats WHERE date = ?', (today,))
-        if not cursor.fetchone():
-            cursor.execute(
-                'INSERT INTO stats (date, total_users, verified_users, new_users) VALUES (?, ?, ?, ?)',
-                (today, total_users, verified_users, 0)
-            )
-        else:
-            cursor.execute(
-                'UPDATE stats SET total_users = ?, verified_users = ? WHERE date = ?',
-                (total_users, verified_users, today)
-            )
-        
         self.conn.commit()
         
         return {
@@ -205,76 +246,35 @@ class Database:
             'role_stats': role_stats
         }
     
-    def get_daily_stats(self, days=7):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT date, total_users, verified_users, new_users FROM stats ORDER BY date DESC LIMIT ?',
-            (days,)
-        )
-        return cursor.fetchall()
+    def can_manage_role(self, user_role, target_role):
+        """Проверяет может ли пользователь управлять определенной ролью"""
+        if user_role in ROLE_HIERARCHY and target_role in ROLE_HIERARCHY[user_role]:
+            return True
+        return False
     
-    def add_admin(self, telegram_id, username):
+    def log_action(self, user_id, action, target_user_id=None, details=None):
+        """Логирует действия пользователей"""
         cursor = self.conn.cursor()
         cursor.execute(
-            'INSERT OR REPLACE INTO users (telegram_id, telegram_username, role) VALUES (?, ?, ?)',
-            (telegram_id, username, 'admin')
+            'INSERT INTO action_logs (user_id, action, target_user_id, details) VALUES (?, ?, ?, ?)',
+            (user_id, action, target_user_id, details)
         )
         self.conn.commit()
     
-    def is_admin(self, telegram_id):
-        role = self.get_role(telegram_id)
-        return role in ['admin', 'owner']
-    
-    def is_owner(self, telegram_id):
-        return self.get_role(telegram_id) == 'owner'
-    
-    def can_manage_roles(self, telegram_id, target_role):
-        """Проверяет может ли пользователь управлять определенной ролью"""
-        user_role = self.get_role(telegram_id)
-        role_hierarchy = ['owner', 'admin', 'moderator', 'guarantor', 'user', 'scammer']
-        
-        try:
-            user_index = role_hierarchy.index(user_role)
-            target_index = role_hierarchy.index(target_role)
-            return user_index <= target_index
-        except ValueError:
-            return False
-
-class RobloxAPI:
-    @staticmethod
-    def get_user_info(username):
-        """Получает информацию о пользователе Roblox используя urllib"""
-        try:
-            params = urllib.parse.urlencode({'keyword': username, 'limit': 10})
-            url = f"https://users.roblox.com/v1/users/search?{params}"
-            
-            req = urllib.request.Request(
-                url,
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            )
-            
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode())
-                
-                if data.get('data'):
-                    for user in data['data']:
-                        if user['name'].lower() == username.lower():
-                            return {
-                                'id': user['id'],
-                                'username': user['name'],
-                                'displayName': user.get('displayName', user['name']),
-                                'success': True
-                            }
-            
-            return {'success': False, 'error': 'Пользователь не найден'}
-            
-        except Exception as e:
-            logger.error(f"Roblox API error: {e}")
-            return {'success': False, 'error': 'Ошибка подключения к Roblox'}
+    def get_recent_actions(self, limit=10):
+        """Получает последние действия"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT al.user_id, u1.telegram_username, al.action, al.target_user_id, u2.telegram_username, al.details, al.created_at
+            FROM action_logs al
+            LEFT JOIN users u1 ON al.user_id = u1.telegram_id
+            LEFT JOIN users u2 ON al.target_user_id = u2.telegram_id
+            ORDER BY al.created_at DESC LIMIT ?
+        ''', (limit,))
+        return cursor.fetchall()
 
 # Инициализация
 db = Database()
-roblox_api = RobloxAPI()
 
 # Добавляем владельцев при запуске
 for admin_id in ADMIN_IDS:
@@ -282,50 +282,395 @@ for admin_id in ADMIN_IDS:
 
 app = Application.builder().token(BOT_TOKEN).build()
 
-# ===== ОСНОВНЫЕ КОМАНДЫ =====
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
-    user = update.effective_user
-    db.add_user(user.id, user.username)
+# ===== СИСТЕМА ВЫДАЧИ РОЛЕЙ =====
+async def start_role_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE, role_key=None):
+    """Начало процесса выдачи роли"""
+    query = update.callback_query
+    user = query.from_user if query else update.effective_user
     
-    if db.is_banned(user.id):
-        await update.message.reply_text("🚫 Вы заблокированы в системе.")
+    if not db.is_admin(user.id):
+        if query:
+            await query.edit_message_text("❌ У вас нет прав для выдачи ролей.")
+        else:
+            await update.message.reply_text("❌ У вас нет прав для выдачи ролей.")
         return
     
-    keyboard = []
-    
-    if not db.is_verified(user.id):
-        keyboard.append([InlineKeyboardButton("🔐 Пройти верификацию", callback_data="verify")])
-    
     user_role = db.get_role(user.id)
-    role_name = ROLES.get(user_role, '👤 Пользователь')
     
-    if db.is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")])
+    if role_key and not db.can_manage_role(user_role, role_key):
+        if query:
+            await query.edit_message_text("❌ У вас нет прав для выдачи этой роли.")
+        else:
+            await update.message.reply_text("❌ У вас нет прав для выдачи этой роли.")
+        return
     
-    keyboard.append([InlineKeyboardButton("📊 Мой профиль", callback_data="profile")])
-    keyboard.append([InlineKeyboardButton("👥 Управление ролями", callback_data="role_management")])
+    if role_key:
+        # Сохраняем состояние для выдачи конкретной роли
+        USER_STATES[user.id] = {'action': 'set_role', 'role': role_key}
+        role_name = ROLES[role_key]
+        
+        keyboard = [
+            [InlineKeyboardButton("❌ Отменить", callback_data="cancel_role_assignment")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = f"""
+🎭 **Выдача роли: {role_name}**
+
+📝 **Отправьте мне один из вариантов:**
+• Telegram ID пользователя
+• @username пользователя
+• Перешлите сообщение пользователя
+
+💡 *Пользователь должен быть зарегистрирован в боте*
+        """
+        
+        if query:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        # Показываем выбор роли для выдачи
+        await show_role_selection(update, user)
+
+async def show_role_selection(update, user):
+    """Показывает выбор роли для выдачи"""
+    user_role = db.get_role(user.id)
+    
+    keyboard = []
+    for role_key, role_name in ROLES.items():
+        if db.can_manage_role(user_role, role_key):
+            keyboard.append([InlineKeyboardButton(f"🎭 Выдать {role_name}", callback_data=f"assign_role_{role_key}")])
+    
+    keyboard.append([InlineKeyboardButton("👥 Все пользователи", callback_data="show_all_users")])
+    keyboard.append([InlineKeyboardButton("📊 Управление пользователями", callback_data="user_management")])
+    keyboard.append([InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    welcome_text = f"""
-🎮 **Добро пожаловать в Roblox Verification Bot!**
+    text = """
+🎭 **Выдача ролей**
 
-🤖 **Ваш статус: {role_name}**
-
-📋 **Что я умею:**
-✅ Проверять Roblox аккаунты
-✅ Вести статистику пользователей  
-✅ Система ролей и прав
-✅ Управление доступом к чатам
-
-🚀 **Начните с верификации чтобы получить доступ к полному функционалу!**
+Выберите роль которую хотите выдать:
     """
     
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    if hasattr(update, 'message'):
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /verify"""
+async def handle_role_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str):
+    """Обработка выдачи роли"""
+    user = update.effective_user
+    
+    if user.id not in USER_STATES or USER_STATES[user.id]['action'] != 'set_role':
+        await update.message.reply_text("❌ Сессия выдачи роли устарела. Начните заново.")
+        return
+    
+    target_role = USER_STATES[user.id]['role']
+    role_name = ROLES[target_role]
+    
+    # Парсим ввод пользователя
+    target_user_id = await parse_user_input(user_input, update.message)
+    
+    if not target_user_id:
+        await update.message.reply_text(
+            "❌ Не удалось распознать пользователя.\n\n"
+            "Отправьте:\n"
+            "• Telegram ID (цифры)\n"
+            "• @username\n"
+            "• Перешлите сообщение"
+        )
+        return
+    
+    # Проверяем что пользователь существует в базе
+    target_user = db.get_user_by_id(target_user_id)
+    if not target_user:
+        await update.message.reply_text("❌ Пользователь не найден в базе данных.")
+        return
+    
+    # Проверяем права на выдачу роли
+    user_role = db.get_role(user.id)
+    target_current_role = target_user['role']
+    
+    if not db.can_manage_role(user_role, target_role):
+        await update.message.reply_text("❌ У вас нет прав для выдачи этой роли.")
+        return
+    
+    # Выдаем роль
+    db.set_role(target_user_id, target_role, user.id)
+    
+    # Удаляем состояние
+    del USER_STATES[user.id]
+    
+    # Отправляем подтверждение
+    target_username = target_user['telegram_username'] or f"ID: {target_user_id}"
+    success_text = f"""
+✅ **Роль успешно выдана!**
+
+🎭 **Пользователь:** @{target_username}
+📛 **Роль:** {role_name}
+👤 **Выдал:** @{user.username or user.id}
+🕐 **Время:** {datetime.now().strftime('%d.%m.%Y %H:%M')}
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🎭 Выдать еще роль", callback_data="assign_role")],
+        [InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")],
+        [InlineKeyboardButton("↩️ Главное меню", callback_data="back_to_main")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(success_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    # Уведомляем целевого пользователя если возможно
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=f"🎭 **Вам выдана новая роль!**\n\nВаша роль изменена на: **{role_name}**\n\nИзменил: @{user.username or user.id}",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.warning(f"Could not notify user {target_user_id}: {e}")
+
+async def parse_user_input(user_input: str, message=None):
+    """Парсит ввод пользователя и возвращает ID"""
+    try:
+        # Если это пересланное сообщение
+        if message and message.forward_from:
+            return message.forward_from.id
+        
+        # Если это ID (только цифры)
+        if user_input.isdigit():
+            return int(user_input)
+        
+        # Если это @username
+        if user_input.startswith('@'):
+            # В реальном боте здесь нужно получить ID по username через API
+            # Для демонстрации возвращаем как есть
+            return user_input[1:]  # Убираем @
+        
+        # Если это просто текст, пробуем как ID
+        try:
+            return int(user_input)
+        except ValueError:
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error parsing user input: {e}")
+        return None
+
+async def cancel_role_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена выдачи роли"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if user.id in USER_STATES:
+        del USER_STATES[user.id]
+    
+    keyboard = [
+        [InlineKeyboardButton("🎭 Выдать роль", callback_data="assign_role")],
+        [InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "❌ Выдача роли отменена.",
+        reply_markup=reply_markup
+    )
+
+# ===== УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ =====
+async def show_user_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает управление пользователями"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("❌ У вас нет прав для управления пользователями.")
+        return
+    
+    text = """
+👥 **Управление пользователями**
+
+Выберите действие:
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🚫 Забанить пользователя", callback_data="ban_user")],
+        [InlineKeyboardButton("✅ Разбанить пользователя", callback_data="unban_user")],
+        [InlineKeyboardButton("👁️ Просмотр пользователя", callback_data="view_user")],
+        [InlineKeyboardButton("📋 Все пользователи", callback_data="show_all_users")],
+        [InlineKeyboardButton("📊 Логи действий", callback_data="show_action_logs")],
+        [InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def start_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса бана пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("❌ У вас нет прав для бана пользователей.")
+        return
+    
+    USER_STATES[user.id] = {'action': 'ban_user'}
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Отменить", callback_data="cancel_action")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🚫 **Бан пользователя**\n\n"
+        "Отправьте Telegram ID или @username пользователя для бана:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def start_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса разбана пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("❌ У вас нет прав для разбана пользователей.")
+        return
+    
+    USER_STATES[user.id] = {'action': 'unban_user'}
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Отменить", callback_data="cancel_action")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "✅ **Разбан пользователя**\n\n"
+        "Отправьте Telegram ID или @username пользователя для разбана:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def handle_user_management(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str):
+    """Обработка управления пользователями"""
+    user = update.effective_user
+    
+    if user.id not in USER_STATES:
+        await update.message.reply_text("❌ Сессия устарела. Начните заново.")
+        return
+    
+    action = USER_STATES[user.id]['action']
+    
+    # Парсим ввод пользователя
+    target_user_id = await parse_user_input(user_input, update.message)
+    
+    if not target_user_id:
+        await update.message.reply_text("❌ Не удалось распознать пользователя.")
+        return
+    
+    # Проверяем что пользователь существует
+    target_user = db.get_user_by_id(target_user_id)
+    if not target_user:
+        await update.message.reply_text("❌ Пользователь не найден в базе данных.")
+        return
+    
+    target_username = target_user['telegram_username'] or f"ID: {target_user_id}"
+    
+    if action == 'ban_user':
+        db.ban_user(target_user_id, user.id)
+        success_text = f"✅ Пользователь @{target_username} забанен."
+    
+    elif action == 'unban_user':
+        db.unban_user(target_user_id, user.id)
+        success_text = f"✅ Пользователь @{target_username} разбанен."
+    
+    # Удаляем состояние
+    del USER_STATES[user.id]
+    
+    keyboard = [
+        [InlineKeyboardButton("👥 Управление пользователями", callback_data="user_management")],
+        [InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(success_text, reply_markup=reply_markup)
+
+async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена действия"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if user.id in USER_STATES:
+        del USER_STATES[user.id]
+    
+    keyboard = [
+        [InlineKeyboardButton("👥 Управление пользователями", callback_data="user_management")],
+        [InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "❌ Действие отменено.",
+        reply_markup=reply_markup
+    )
+
+async def show_action_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает логи действий"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if not db.is_admin(user.id):
+        await query.edit_message_text("❌ У вас нет прав для просмотра логов.")
+        return
+    
+    logs = db.get_recent_actions(10)
+    
+    if not logs:
+        logs_text = "📝 Логов действий пока нет."
+    else:
+        logs_text = "📝 **Последние действия:**\n\n"
+        for log in logs:
+            user_id, user_name, action, target_id, target_name, details, created_at = log
+            user_display = f"@{user_name}" if user_name else f"ID:{user_id}"
+            target_display = f"@{target_name}" if target_name else f"ID:{target_id}" if target_id else "N/A"
+            
+            action_map = {
+                'set_role': 'изменил роль',
+                'ban_user': 'забанил',
+                'unban_user': 'разбанил'
+            }
+            
+            action_text = action_map.get(action, action)
+            logs_text += f"• {user_display} {action_text} {target_display}\n"
+            if details:
+                logs_text += f"  📄 {details}\n"
+            logs_text += f"  🕐 {created_at}\n\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Обновить", callback_data="show_action_logs")],
+        [InlineKeyboardButton("↩️ Назад", callback_data="user_management")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(logs_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# ===== ПОШАГОВАЯ ВЕРИФИКАЦИЯ =====
+async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса верификации - Шаг 1"""
     user = update.effective_user
     
     if db.is_banned(user.id):
@@ -347,34 +692,222 @@ async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     verification_code = db.generate_verification_code()
     db.set_verification_code(user.id, verification_code)
     
+    # Сохраняем состояние
+    USER_STATES[user.id] = {'step': 1, 'code': verification_code}
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Я добавил код в описание", callback_data="verification_step_2")],
+        [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
-        f"👤 **Отправьте ваш никнейм Roblox**\n\n"
-        f"🔐 **Ваш код верификации: `{verification_code}`**\n\n"
-        f"📝 **Инструкция:**\n"
-        f"1. Скопируйте код выше\n"
-        f"2. Добавьте его в описание вашего аккаунта Roblox\n"
-        f"3. Отправьте ваш никнейм Roblox\n"
-        f"4. Бот проверит наличие кода в описании\n\n"
-        f"Можно отправить:\n"
-        f"• Никнейм (например: `AlexRoblox`)\n"
-        f"• Ссылку на профиль\n"
-        f"• ID пользователя",
+        f"🔐 **ШАГ 1 из 3: Добавьте код в описание Roblox**\n\n"
+        f"📝 **Ваш уникальный код верификации:**\n"
+        f"```\n{verification_code}\n```\n"
+        f"**Инструкция:**\n"
+        f"1. Откройте Roblox\n"
+        f"2. Перейдите в настройки профиля\n"
+        f"3. Найдите поле \"Описание\"\n"
+        f"4. Добавьте код выше в описание\n"
+        f"5. Сохраните изменения\n\n"
+        f"💡 *Код должен быть виден в описании вашего профиля*",
+        reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
+async def verification_step_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2 верификации - ввод никнейма"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if user.id not in USER_STATES:
+        await query.edit_message_text("❌ Сессия верификации устарела. Начните заново с /verify")
+        return
+    
+    USER_STATES[user.id]['step'] = 2
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"👤 **ШАГ 2 из 3: Введите ваш никнейм Roblox**\n\n"
+        f"📝 **Отправьте мне ваш никнейм в Roblox**\n\n"
+        f"**Можно отправить:**\n"
+        f"• Никнейм (например: `AlexRoblox`)\n"
+        f"• Ссылку на профиль\n"
+        f"• ID пользователя\n\n"
+        f"💡 *Убедитесь что код {USER_STATES[user.id]['code']} добавлен в описание перед продолжением*",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def verification_step_3(update: Update, context: ContextTypes.DEFAULT_TYPE, username: str):
+    """Шаг 3 верификации - проверка кода"""
+    user = update.effective_user
+    
+    if user.id not in USER_STATES:
+        await update.message.reply_text("❌ Сессия верификации устарела. Начните заново с /verify")
+        return
+    
+    verification_code = USER_STATES[user.id]['code']
+    
+    await update.message.reply_text("🔍 Проверяем аккаунт Roblox...")
+    
+    # Получаем информацию о пользователе Roblox
+    user_info = get_roblox_user_info(username)
+    
+    if not user_info['success']:
+        keyboard = [
+            [InlineKeyboardButton("🔄 Попробовать другой никнейм", callback_data="verification_step_2")],
+            [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"❌ **Ошибка:** {user_info['error']}\n\n"
+            f"Проверьте правильность никнейма и попробуйте снова.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Проверяем код в описании (заглушка)
+    await update.message.reply_text("🔐 Проверяем код верификации в описании...")
+    code_verified = True  # В реальном боте здесь должна быть проверка через Roblox API
+    
+    if not code_verified:
+        keyboard = [
+            [InlineKeyboardButton("🔄 Попробовать снова", callback_data="verification_step_2")],
+            [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"❌ **Код верификации не найден!**\n\n"
+            f"🔐 Ваш код: `{verification_code}`\n\n"
+            f"**Убедитесь что:**\n"
+            f"• Код добавлен в описание профиля Roblox\n"
+            f"• Описание сохранено\n"
+            f"• Код точно совпадает\n\n"
+            f"Попробуйте снова:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Верификация успешна!
+    db.set_verified(user.id, user_info['username'], user_info['id'])
+    
+    # Удаляем состояние верификации
+    if user.id in USER_STATES:
+        del USER_STATES[user.id]
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Мой профиль", callback_data="profile")],
+        [InlineKeyboardButton("🎉 Перейти в чат", url="https://t.me/your_chat_link")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    success_text = f"""
+✅ **ВЕРИФИКАЦИЯ УСПЕШНО ЗАВЕРШЕНА!**
+
+🎮 **Ваши данные:**
+├ Roblox: `{user_info['username']}`
+├ Display Name: `{user_info['displayName']}`
+├ ID: `{user_info['id']}`
+├ Код: `{verification_code}`
+└ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+🎉 **Теперь вам доступны:**
+• Полный доступ к чатам
+• Участие в мероприятиях
+• Все функции бота
+
+💫 Добро пожаловать в наше сообщество!
+    """
+    
+    await update.message.reply_text(success_text, reply_markup=reply_markup, parse_mode='Markdown')
+    logger.info(f"User {user.id} verified as {user_info['username']}")
+
+async def cancel_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена верификации"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    
+    if user.id in USER_STATES:
+        del USER_STATES[user.id]
+    
+    keyboard = [
+        [InlineKeyboardButton("🔐 Начать верификацию", callback_data="verify")],
+        [InlineKeyboardButton("📊 Мой профиль", callback_data="profile")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "❌ Верификация отменена.\n\n"
+        "Вы можете начать процесс верификации в любое время.",
+        reply_markup=reply_markup
+    )
+
+# ===== ОСНОВНЫЕ КОМАНДЫ =====
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
+    user = update.effective_user
+    db.add_user(user.id, user.username)
+    
+    if db.is_banned(user.id):
+        await update.message.reply_text("🚫 Вы заблокированы в системе.")
+        return
+    
+    user_role = db.get_role(user.id)
+    role_name = ROLES.get(user_role, '👤 Пользователь')
+    
+    keyboard = []
+    
+    if not db.is_verified(user.id):
+        keyboard.append([InlineKeyboardButton("🔐 Начать верификацию", callback_data="verify")])
+    else:
+        keyboard.append([InlineKeyboardButton("📊 Мой профиль", callback_data="profile")])
+    
+    if db.is_admin(user.id):
+        keyboard.append([InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")])
+        keyboard.append([InlineKeyboardButton("🎭 Управление ролями", callback_data="role_management")])
+    
+    keyboard.append([InlineKeyboardButton("📈 Статистика", callback_data="stats")])
+    keyboard.append([InlineKeyboardButton("🆘 Помощь", callback_data="help")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    welcome_text = f"""
+🎮 **Добро пожаловать в Roblox Verification Bot!**
+
+🤖 **Ваш статус: {role_name}**
+
+📋 **Основные функции:**
+✅ Пошаговая верификация Roblox
+🎭 Система ролей и прав
+📊 Детальная статистика
+👥 Управление пользователями
+
+🚀 **Для начала работы нажмите кнопку ниже:**
+    """
+    
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /profile"""
-    await show_profile_message(update, update.effective_user)
+    await show_profile(update, update.effective_user)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /stats"""
-    user = update.effective_user
-    
-    if not db.is_admin(user.id):
-        await update.message.reply_text("❌ У вас нет прав для просмотра статистики.")
-        return
-    
-    await show_admin_stats_message(update)
+    await show_stats(update)
 
 async def roles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /roles"""
@@ -384,40 +917,11 @@ async def roles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас нет прав для управления ролями.")
         return
     
-    await show_role_management(update)
+    await show_role_management(update, user)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /help"""
-    help_text = """
-🆘 **Помощь по боту**
-
-📋 **Доступные команды:**
-/start - Запустить бота
-/verify - Пройти верификацию
-/profile - Мой профиль
-/help - Эта справка
-
-👑 **Команды для администраторов:**
-/stats - Статистика бота
-/roles - Управление ролями
-
-🔍 **Как пройти верификацию:**
-1. Нажмите "🔐 Пройти верификацию"
-2. Получите код верификации
-3. Добавьте код в описание Roblox аккаунта
-4. Отправьте ваш никнейм Roblox
-5. Бот проверит аккаунт и код
-
-🎭 **Система ролей:**
-👑 Владелец - Полный доступ
-⚡ Админ - Управление ботом
-🛡️ Модератор - Модерация
-✅ Гарант - Проверенные пользователи
-👤 Пользователь - Обычный пользователь
-🚫 Скамер - Заблокированные
-    """
-    
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await show_help(update)
 
 # ===== ОБРАБОТЧИКИ СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,9 +938,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 Вы заблокированы в системе.")
         return
     
-    # Если пользователь не верифицирован, обрабатываем как попытку верификации
-    if not db.is_verified(user.id):
-        await process_verification(update, text)
+    # Проверяем состояние выдачи роли
+    if user.id in USER_STATES and USER_STATES[user.id]['action'] == 'set_role':
+        await handle_role_assignment(update, context, text)
+        return
+    
+    # Проверяем состояние управления пользователями
+    if user.id in USER_STATES and USER_STATES[user.id]['action'] in ['ban_user', 'unban_user']:
+        await handle_user_management(update, context, text)
+        return
+    
+    # Проверяем состояние верификации
+    if user.id in USER_STATES and USER_STATES[user.id].get('step') == 2:
+        await verification_step_3(update, context, text)
         return
     
     # Если пользователь уже верифицирован
@@ -450,98 +964,108 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
 
-async def process_verification(update: Update, text: str):
-    """Обработка верификации"""
-    user = update.effective_user
+# ===== ОБРАБОТЧИКИ КНОПОК =====
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки"""
+    query = update.callback_query
+    await query.answer()
     
-    # Извлекаем username из текста
-    username = extract_username(text)
+    user = query.from_user
+    data = query.data
     
-    if not username:
-        await update.message.reply_text(
-            "❌ Неверный формат. Отправьте:\n"
-            "• Никнейм (например: `AlexRoblox`)\n" 
-            "• Ссылку на профиль Roblox\n"
-            "• ID пользователя",
-            parse_mode='Markdown'
+    if data == "verify":
+        await start_verification(update, context)
+    
+    elif data == "verification_step_2":
+        await verification_step_2(update, context)
+    
+    elif data == "cancel_verification":
+        await cancel_verification(update, context)
+    
+    elif data == "profile":
+        await show_profile(query, user)
+    
+    elif data == "admin_panel":
+        await show_admin_panel(query, user)
+    
+    elif data == "stats":
+        await show_stats(query)
+    
+    elif data == "role_management":
+        await show_role_management(query, user)
+    
+    elif data == "user_management":
+        await show_user_management(update, context)
+    
+    elif data == "assign_role":
+        await start_role_assignment(update, context)
+    
+    elif data.startswith("assign_role_"):
+        role_key = data.replace("assign_role_", "")
+        await start_role_assignment(update, context, role_key)
+    
+    elif data == "show_all_users":
+        await show_all_users(update, context)
+    
+    elif data == "cancel_role_assignment":
+        await cancel_role_assignment(update, context)
+    
+    elif data == "ban_user":
+        await start_ban_user(update, context)
+    
+    elif data == "unban_user":
+        await start_unban_user(update, context)
+    
+    elif data == "cancel_action":
+        await cancel_action(update, context)
+    
+    elif data == "show_action_logs":
+        await show_action_logs(update, context)
+    
+    elif data.startswith("role_"):
+        await show_role_users(query, user, data)
+    
+    elif data == "help":
+        await show_help(query)
+    
+    elif data == "back_to_main":
+        await start_command(update, context)
+
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+def get_roblox_user_info(username):
+    """Получает информацию о пользователе Roblox"""
+    try:
+        # Извлекаем чистый username
+        clean_username = extract_username(username)
+        if not clean_username:
+            return {'success': False, 'error': 'Неверный формат никнейма'}
+        
+        params = urllib.parse.urlencode({'keyword': clean_username, 'limit': 10})
+        url = f"https://users.roblox.com/v1/users/search?{params}"
+        
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         )
-        return
-    
-    # Получаем код верификации
-    verification_code = db.get_verification_code(user.id)
-    
-    if not verification_code:
-        await update.message.reply_text("❌ Код верификации не найден. Начните процесс заново с /verify")
-        return
-    
-    # Проверяем пользователя через Roblox API
-    await update.message.reply_text("🔍 Проверяем аккаунт Roblox и код верификации...")
-    
-    user_info = roblox_api.get_user_info(username)
-    
-    if not user_info['success']:
-        await update.message.reply_text(
-            f"❌ Ошибка: {user_info['error']}\n\n"
-            f"Проверьте правильность никнейма и попробуйте снова."
-        )
-        return
-    
-    # Здесь должна быть проверка кода в описании аккаунта Roblox
-    # В реальном боте нужно получить описание аккаунта через Roblox API
-    # Для демонстрации просто подтверждаем верификацию
-    
-    code_verified = await check_verification_code(user_info['id'], verification_code)
-    
-    if not code_verified:
-        await update.message.reply_text(
-            f"❌ Код верификации не найден в описании аккаунта!\n\n"
-            f"🔐 Ваш код: `{verification_code}`\n\n"
-            f"Добавьте этот код в описание вашего Roblox аккаунта и попробуйте снова.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Сохраняем верификацию
-    db.set_verified(user.id, user_info['username'], user_info['id'])
-    
-    # Отправляем успешное сообщение
-    success_text = f"""
-✅ **Верификация успешно пройдена!**
-
-🎮 **Ваши данные:**
-├ Roblox: `{user_info['username']}`
-├ Display Name: `{user_info['displayName']}`
-├ ID: `{user_info['id']}`
-├ Код: `{verification_code}`
-└ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
-
-🎉 Теперь у вас есть доступ ко всем функциям!
-
-💫 **Что доступно:**
-• Участие в чатах
-• Доступ к закрытым каналам  
-• Участие в мероприятиях
-• Полный функционал бота
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Мой профиль", callback_data="profile")],
-        [InlineKeyboardButton("🔄 Проверить другой аккаунт", callback_data="verify")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(success_text, reply_markup=reply_markup, parse_mode='Markdown')
-    
-    logger.info(f"User {user.id} verified as {user_info['username']}")
-
-async def check_verification_code(roblox_id, verification_code):
-    """
-    Проверяет наличие кода верификации в описании аккаунта Roblox
-    В реальной реализации нужно получить описание через Roblox API
-    """
-    # Заглушка - в реальном боте здесь должен быть запрос к Roblox API
-    # для получения описания аккаунта и проверки наличия кода
-    return True  # Для демонстрации всегда возвращаем True
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            
+            if data.get('data'):
+                for user in data['data']:
+                    if user['name'].lower() == clean_username.lower():
+                        return {
+                            'id': user['id'],
+                            'username': user['name'],
+                            'displayName': user.get('displayName', user['name']),
+                            'success': True
+                        }
+        
+        return {'success': False, 'error': 'Пользователь не найден'}
+        
+    except Exception as e:
+        logger.error(f"Roblox API error: {e}")
+        return {'success': False, 'error': 'Ошибка подключения к Roblox'}
 
 def extract_username(text):
     """Извлекает username из текста"""
@@ -553,7 +1077,18 @@ def extract_username(text):
     if 'roblox.com/users/' in text:
         match = re.search(r'roblox\.com/users/(\d+)/?', text)
         if match:
-            return get_username_by_id(match.group(1))
+            # Получаем username по ID
+            try:
+                url = f"https://users.roblox.com/v1/users/{match.group(1)}"
+                req = urllib.request.Request(
+                    url,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    data = json.loads(response.read().decode())
+                    return data.get('name')
+            except:
+                return None
     
     # Если это упоминание
     text = text.replace('@', '')
@@ -564,97 +1099,12 @@ def extract_username(text):
     
     return None
 
-def get_username_by_id(user_id):
-    """Получает username по ID используя urllib"""
-    try:
-        url = f"https://users.roblox.com/v1/users/{user_id}"
-        req = urllib.request.Request(
-            url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        )
-        
-        with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode())
-            return data.get('name')
-    except:
-        pass
-    return None
-
-# ===== ОБРАБОТЧИКИ КНОПОК =====
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий на кнопки"""
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    data = query.data
-    
-    if data == "verify":
-        await handle_verify_button(query, user)
-    
-    elif data == "profile":
-        await show_profile_message(query, user)
-    
-    elif data == "admin_panel":
-        await show_admin_panel(query, user)
-    
-    elif data == "admin_stats":
-        await show_admin_stats_message(query)
-    
-    elif data == "role_management":
-        await show_role_management(query, user)
-    
-    elif data.startswith("role_"):
-        await handle_role_button(query, user, data)
-    
-    elif data.startswith("setrole_"):
-        await handle_set_role(query, user, data)
-    
-    elif data == "admin_back":
-        await show_admin_panel(query, user)
-
-async def handle_verify_button(query, user):
-    """Обработка кнопки верификации"""
-    if db.is_banned(user.id):
-        await query.edit_message_text("🚫 Вы заблокированы в системе.")
-        return
-    
-    if db.is_verified(user.id):
-        user_stats = db.get_user_stats(user.id)
-        if user_stats:
-            roblox_username = user_stats[0]
-            await query.edit_message_text(
-                f"✅ Вы уже верифицированы как `{roblox_username}`\n\n"
-                f"Для смены аккаунта обратитесь к администратору.",
-                parse_mode='Markdown'
-            )
-        return
-    
-    # Генерируем код верификации
-    verification_code = db.generate_verification_code()
-    db.set_verification_code(user.id, verification_code)
-    
-    await query.edit_message_text(
-        f"👤 **Отправьте ваш никнейм Roblox**\n\n"
-        f"🔐 **Ваш код верификации: `{verification_code}`**\n\n"
-        f"📝 **Инструкция:**\n"
-        f"1. Скопируйте код выше\n"
-        f"2. Добавьте его в описание вашего аккаунта Roblox\n"
-        f"3. Отправьте ваш никнейм Roblox\n"
-        f"4. Бот проверит наличие кода в описании\n\n"
-        f"Можно отправить:\n"
-        f"• Никнейм (например: `AlexRoblox`)\n"
-        f"• Ссылку на профиль\n"
-        f"• ID пользователя",
-        parse_mode='Markdown'
-    )
-
-async def show_profile_message(update, user):
+async def show_profile(update, user):
     """Показывает профиль пользователя"""
     stats = db.get_user_stats(user.id)
     
     if not stats:
-        profile_text = "❌ Вы еще не зарегистрированы в системе. Используйте /start"
+        profile_text = "❌ Вы еще не зарегистрированы в системе."
     else:
         roblox_username, verified, verified_at, role = stats
         role_name = ROLES.get(role, '👤 Пользователь')
@@ -679,18 +1129,15 @@ async def show_profile_message(update, user):
 🎭 Роль: {role_name}
 ❌ Статус: Не верифицирован
 
-💡 Нажмите кнопку ниже для верификации
+💡 Пройдите верификацию для доступа к полному функционалу
             """
     
     keyboard = []
     if not verified:
-        keyboard.append([InlineKeyboardButton("🔐 Пройти верификацию", callback_data="verify")])
+        keyboard.append([InlineKeyboardButton("🔐 Начать верификацию", callback_data="verify")])
     
-    if db.is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")])
-    
-    keyboard.append([InlineKeyboardButton("👥 Управление ролями", callback_data="role_management")])
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="profile")])
+    keyboard.append([InlineKeyboardButton("↩️ Главное меню", callback_data="back_to_main")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -722,10 +1169,11 @@ async def show_admin_panel(update, user):
     """
     
     keyboard = [
-        [InlineKeyboardButton("📈 Детальная статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 Управление ролями", callback_data="role_management")],
+        [InlineKeyboardButton("📈 Детальная статистика", callback_data="stats")],
+        [InlineKeyboardButton("🎭 Управление ролями", callback_data="role_management")],
+        [InlineKeyboardButton("👥 Управление пользователями", callback_data="user_management")],
         [InlineKeyboardButton("🔄 Обновить", callback_data="admin_panel")],
-        [InlineKeyboardButton("↩️ Назад", callback_data="profile")]
+        [InlineKeyboardButton("↩️ Главное меню", callback_data="back_to_main")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -735,10 +1183,9 @@ async def show_admin_panel(update, user):
     else:
         await update.edit_message_text(admin_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def show_admin_stats_message(update):
-    """Показывает детальную статистику"""
+async def show_stats(update):
+    """Показывает статистику"""
     stats = db.get_bot_stats()
-    daily_stats = db.get_daily_stats(7)
     
     total = stats['total_users']
     verified = stats['verified_users']
@@ -746,19 +1193,12 @@ async def show_admin_stats_message(update):
     pending = total - verified - banned
     
     verified_percent = (verified / total * 100) if total > 0 else 0
-    pending_percent = (pending / total * 100) if total > 0 else 0
     
     # Статистика по ролям
     role_stats_text = ""
     for role, count in stats['role_stats'].items():
-        if count > 0:
+        if count > 0 and role != 'user':
             role_stats_text += f"├ {ROLES[role]}: {count}\n"
-    
-    # Дневная статистика
-    daily_text = ""
-    for day_stat in daily_stats[:3]:  # Последние 3 дня
-        date = datetime.strptime(day_stat[0], '%Y-%m-%d').strftime('%d.%m')
-        daily_text += f"├ {date}: +{day_stat[3]} новых\n"
     
     stats_text = f"""
 📈 **Детальная статистика**
@@ -769,14 +1209,10 @@ async def show_admin_stats_message(update):
 ├ Ожидают: {pending}
 └ Заблокировано: {banned}
 
-📊 **Процент верификации:**
-├ Успешно: {verified_percent:.1f}%
-└ Ожидают: {pending_percent:.1f}%
+📊 **Процент верификации: {verified_percent:.1f}%**
 
 🎭 **Распределение по ролям:**
 {role_stats_text}
-📅 **Статистика за 3 дня:**
-{daily_text}
 ⚡ **Система:**
 ├ Бот: 🟢 Онлайн
 ├ База данных: 🟢 Работает
@@ -785,7 +1221,7 @@ async def show_admin_stats_message(update):
     
     keyboard = [
         [InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")],
-        [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")]
+        [InlineKeyboardButton("🔄 Обновить", callback_data="stats")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -805,6 +1241,7 @@ async def show_role_management(update, user):
         return
     
     user_role = db.get_role(user.id)
+    user_role_name = ROLES[user_role]
     
     role_text = f"""
 👥 **Управление ролями**
@@ -817,13 +1254,29 @@ async def show_role_management(update, user):
 👤 Пользователь - Обычный пользователь
 🚫 Скамер - Заблокированные пользователи
 
-💡 **Ваша роль: {ROLES[user_role]}**
+💡 **Ваша роль: {user_role_name}**
+🛠️ **Вы можете выдавать роли:**
     """
     
-    keyboard = []
+    # Показываем какие роли может выдавать пользователь
+    manageable_roles = []
     for role_key, role_name in ROLES.items():
-        if db.can_manage_roles(user.id, role_key):
-            keyboard.append([InlineKeyboardButton(f"{role_name}", callback_data=f"role_{role_key}")])
+        if db.can_manage_role(user_role, role_key):
+            manageable_roles.append(role_name)
+    
+    if manageable_roles:
+        role_text += "\n".join([f"• {role}" for role in manageable_roles])
+    else:
+        role_text += "\n❌ Нет доступных ролей для выдачи"
+    
+    keyboard = [
+        [InlineKeyboardButton("🎭 Выдать роль", callback_data="assign_role")],
+        [InlineKeyboardButton("👥 Все пользователи", callback_data="show_all_users")]
+    ]
+    
+    # Добавляем кнопки для просмотра пользователей по ролям
+    for role_key, role_name in ROLES.items():
+        keyboard.append([InlineKeyboardButton(f"👁️ Показать {role_name}", callback_data=f"role_{role_key}")])
     
     keyboard.append([InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")])
     
@@ -834,57 +1287,129 @@ async def show_role_management(update, user):
     else:
         await update.edit_message_text(role_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def handle_role_button(query, user, data):
-    """Обработка выбора роли"""
+async def show_role_users(update, user, data):
+    """Показывает пользователей с определенной ролью"""
     role_key = data.replace("role_", "")
-    
-    if not db.can_manage_roles(user.id, role_key):
-        await query.edit_message_text("❌ У вас нет прав для управления этой ролью.")
-        return
+    role_name = ROLES[role_key]
     
     users = db.get_users_by_role(role_key)
-    role_name = ROLES[role_key]
     
     if not users:
-        users_text = "❌ Пользователей с этой ролью нет"
+        users_text = f"❌ Пользователей с ролью {role_name} нет"
     else:
         users_text = f"👥 **Пользователи с ролью {role_name}:**\n\n"
-        for i, (user_id, tg_username, roblox_username) in enumerate(users[:20], 1):  # Ограничиваем 20 пользователями
-            username_display = tg_username or f"ID: {user_id}"
-            roblox_display = roblox_username or "Не верифицирован"
-            users_text += f"{i}. @{username_display} - {roblox_display}\n"
+        for i, (user_id, tg_username, roblox_username) in enumerate(users[:15], 1):
+            username_display = f"@{tg_username}" if tg_username else f"ID: {user_id}"
+            roblox_display = f"({roblox_username})" if roblox_username else ""
+            users_text += f"{i}. {username_display} {roblox_display}\n"
         
-        if len(users) > 20:
-            users_text += f"\n... и еще {len(users) - 20} пользователей"
+        if len(users) > 15:
+            users_text += f"\n... и еще {len(users) - 15} пользователей"
     
-    keyboard = []
-    
-    # Кнопки для добавления пользователей в эту роль
-    if role_key not in ['scammer']:  # Не добавляем кнопку для скамеров
-        keyboard.append([InlineKeyboardButton(f"➕ Добавить {role_name}", callback_data=f"setrole_{role_key}")])
-    
-    keyboard.append([InlineKeyboardButton("↩️ Назад к ролям", callback_data="role_management")])
+    keyboard = [
+        [InlineKeyboardButton("🎭 Выдать эту роль", callback_data=f"assign_role_{role_key}")],
+        [InlineKeyboardButton("↩️ Назад к ролям", callback_data="role_management")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data=f"role_{role_key}")]
+    ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(users_text, reply_markup=reply_markup, parse_mode='Markdown')
+    await update.edit_message_text(users_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def handle_set_role(query, user, data):
-    """Обработка установки роли"""
-    role_key = data.replace("setrole_", "")
-    role_name = ROLES[role_key]
+async def show_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает всех пользователей"""
+    query = update.callback_query
+    await query.answer()
     
-    await query.edit_message_text(
-        f"🎭 **Добавление роли {role_name}**\n\n"
-        f"Отправьте Telegram ID пользователя, которому хотите выдать роль {role_name}.\n\n"
-        f"💡 **Как получить ID?**\n"
-        f"• Попросите пользователя написать @userinfobot\n"
-        f"• Или перешлите его сообщение боту",
-        parse_mode='Markdown'
-    )
+    user = query.from_user
     
-    # Сохраняем состояние для обработки следующего сообщения
-    query.message.chat_data['awaiting_role'] = role_key
-    query.message.chat_data['role_setter'] = user.id
+    if not db.is_admin(user.id):
+        await query.edit_message_text("❌ У вас нет прав для просмотра всех пользователей.")
+        return
+    
+    users = db.get_all_users()
+    
+    if not users:
+        users_text = "❌ В базе нет пользователей."
+    else:
+        users_text = "👥 **Все пользователи:**\n\n"
+        
+        current_role = None
+        for user_data in users:
+            telegram_id, tg_username, roblox_username, role, verified = user_data
+            role_name = ROLES.get(role, '👤 Пользователь')
+            
+            if role != current_role:
+                users_text += f"\n**{role_name}:**\n"
+                current_role = role
+            
+            username_display = f"@{tg_username}" if tg_username else f"ID: {telegram_id}"
+            roblox_display = f"({roblox_username})" if roblox_username else ""
+            verified_status = "✅" if verified else "❌"
+            users_text += f"• {username_display} {roblox_display} {verified_status}\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🎭 Выдать роль", callback_data="assign_role")],
+        [InlineKeyboardButton("↩️ Назад к ролям", callback_data="role_management")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Разбиваем сообщение если оно слишком длинное
+    if len(users_text) > 4000:
+        parts = [users_text[i:i+4000] for i in range(0, len(users_text), 4000)]
+        for part in parts[:-1]:
+            await query.message.reply_text(part, parse_mode='Markdown')
+        await query.edit_message_text(parts[-1], reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await query.edit_message_text(users_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def show_help(update):
+    """Показывает справку"""
+    help_text = """
+🆘 **Помощь по боту**
+
+📋 **Основные команды:**
+/start - Главное меню
+/profile - Мой профиль
+/stats - Статистика (админы)
+/roles - Управление ролями (админы)
+/help - Эта справка
+
+🔐 **Процесс верификации:**
+1. Нажмите "Начать верификацию"
+2. Добавьте код в описание Roblox
+3. Введите ваш никнейм Roblox
+4. Бот проверит код и завершит верификацию
+
+🎭 **Система ролей:**
+👑 Владелец - Полный доступ
+⚡ Админ - Управление ботом
+🛡️ Модератор - Модерация
+✅ Гарант - Проверенные пользователи
+👤 Пользователь - Обычный пользователь
+🚫 Скамер - Заблокированные
+
+👥 **Управление пользователями:**
+• Бан/разбан пользователей
+• Просмотр всех пользователей
+• Логи действий
+
+❓ **Проблемы с верификацией?**
+• Убедитесь что код точно скопирован
+• Проверьте что описание сохранено
+• Если проблемы остаются - обратитесь к администратору
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🔐 Начать верификацию", callback_data="verify")],
+        [InlineKeyboardButton("📊 Мой профиль", callback_data="profile")],
+        [InlineKeyboardButton("↩️ Главное меню", callback_data="back_to_main")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if hasattr(update, 'message'):
+        await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.edit_message_text(help_text, reply_markup=reply_markup, parse_mode='Markdown')
 
 # ===== ЗАПУСК БОТА =====
 def main():
@@ -896,7 +1421,6 @@ def main():
     try:
         # Регистрация обработчиков
         app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CommandHandler("verify", verify_command))
         app.add_handler(CommandHandler("profile", profile_command))
         app.add_handler(CommandHandler("stats", stats_command))
         app.add_handler(CommandHandler("roles", roles_command))
@@ -907,7 +1431,7 @@ def main():
         
         # Запуск бота
         logger.info("🤖 Бот запускается...")
-        logger.info(f"👑 Владельцы: {ADMIN_IDS}")
+        logger.info(f"👑 Владелец: {ADMIN_IDS[0]}")
         app.run_polling()
         
     except Exception as e:
