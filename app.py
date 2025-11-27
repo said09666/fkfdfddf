@@ -1,13 +1,15 @@
 import os
 import logging
 import asyncio
+import sqlite3
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import requests
-from datetime import datetime
+from dotenv import load_dotenv
 
-from config import Config, Text
-from database import Database
+# Загружаем переменные окружения
+load_dotenv()
 
 # Настройка логирования для Bothost
 logging.basicConfig(
@@ -20,6 +22,208 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Конфигурация
+class Config:
+    BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+    ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '123456789').split(',') if x]
+    DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///bot_database.db')
+    
+    WELCOME_MESSAGE = """
+🎮 **Добро пожаловать в наше сообщество!**
+
+Чтобы получить доступ к чату, необходимо пройти верификацию через Roblox.
+
+📝 **Инструкция:**
+1. Нажмите кнопку "🔐 Пройти верификацию"
+2. Отправьте свой **никнейм Roblox** или **ссылку на профиль**
+3. Бот проверит ваш аккаунт
+4. Получите доступ ко всем функциям чата!
+
+⚡ **Быстрая верификация - полный доступ к чату!**
+    """
+    
+    SUCCESS_MESSAGE = """
+✅ **Верификация успешно пройдена!**
+
+Теперь у вас есть доступ ко всем функциям чата.
+
+📊 **Ваши данные:**
+👤 Roblox: {username}
+🆔 ID: {user_id}
+📅 Дата регистрации: {join_date}
+
+Добро пожаловать в наше сообщество! 🎉
+    """
+
+class Text:
+    VERIFY_NOW = "🔐 Пройти верификацию"
+    ADMIN_PANEL = "⚙️ Панель администратора"
+    BACK = "↩️ Назад"
+    STATS = "📊 Статистика"
+    
+    REQUEST_USERNAME = "👤 Пожалуйста, отправьте ваш никнейм Roblox или ссылку на профиль:"
+    VERIFICATION_STARTED = "🔍 Начинаем проверку пользователя..."
+    USER_NOT_FOUND = "❌ Пользователь не найден. Проверьте правильность никнейма и попробуйте снова."
+    FRIEND_REQUEST_SENT = "✅ Верификация успешно завершена! Теперь у вас есть доступ к чату."
+    ALREADY_VERIFIED = "✅ Вы уже прошли верификацию!"
+    BANNED = "🚫 Вы заблокированы в системе."
+
+# Класс базы данных
+class Database:
+    def __init__(self, db_path='bot_database.db'):
+        self.db_path = db_path
+        self.init_db()
+    
+    def init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Пользователи
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER UNIQUE,
+                roblox_username TEXT,
+                roblox_id INTEGER,
+                verified BOOLEAN DEFAULT FALSE,
+                verification_date TIMESTAMP,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                banned BOOLEAN DEFAULT FALSE,
+                ban_reason TEXT
+            )
+        ''')
+        
+        # Администраторы
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER UNIQUE,
+                username TEXT,
+                permissions TEXT DEFAULT 'all',
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    
+    def add_user(self, telegram_id, roblox_username=None, roblox_id=None):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT OR IGNORE INTO users (telegram_id, roblox_username, roblox_id)
+                VALUES (?, ?, ?)
+            ''', (telegram_id, roblox_username, roblox_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding user: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def update_verification(self, telegram_id, roblox_username, roblox_id, verified=True):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE users 
+            SET roblox_username = ?, roblox_id = ?, verified = ?, verification_date = ?
+            WHERE telegram_id = ?
+        ''', (roblox_username, roblox_id, verified, datetime.now(), telegram_id))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"User {telegram_id} verified as {roblox_username}")
+    
+    def get_user(self, telegram_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM users WHERE telegram_id = ?', (telegram_id,))
+        user = cursor.fetchone()
+        
+        conn.close()
+        return user
+    
+    def is_verified(self, telegram_id):
+        user = self.get_user(telegram_id)
+        return user and user[4]  # verified field
+    
+    def is_banned(self, telegram_id):
+        user = self.get_user(telegram_id)
+        return user and user[7]  # banned field
+    
+    def ban_user(self, telegram_id, reason="Нарушение правил"):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE users SET banned = TRUE, ban_reason = ? WHERE telegram_id = ?
+        ''', (reason, telegram_id))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"User {telegram_id} banned: {reason}")
+    
+    def unban_user(self, telegram_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('UPDATE users SET banned = FALSE, ban_reason = NULL WHERE telegram_id = ?', (telegram_id,))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"User {telegram_id} unbanned")
+    
+    def get_stats(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE verified = TRUE')
+        verified_users = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE banned = TRUE')
+        banned_users = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            'total_users': total_users,
+            'verified_users': verified_users,
+            'banned_users': banned_users
+        }
+    
+    def add_admin(self, telegram_id, username):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO admins (telegram_id, username)
+            VALUES (?, ?)
+        ''', (telegram_id, username))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Admin added: {telegram_id} ({username})")
+    
+    def is_admin(self, telegram_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM admins WHERE telegram_id = ?', (telegram_id,))
+        admin = cursor.fetchone()
+        
+        conn.close()
+        return admin is not None
+
+# Основной класс бота
 class RobloxVerificationBot:
     def __init__(self):
         self.db = Database()
@@ -29,6 +233,9 @@ class RobloxVerificationBot:
     def setup_bot(self):
         """Инициализация бота"""
         try:
+            if not Config.BOT_TOKEN:
+                raise ValueError("BOT_TOKEN not found in environment variables")
+                
             self.application = Application.builder().token(Config.BOT_TOKEN).build()
             self.setup_handlers()
             logger.info("Bot initialized successfully")
@@ -147,6 +354,10 @@ class RobloxVerificationBot:
                     # Новый пользователь
                     user_id = new_member.id
                     
+                    # Добавляем пользователя в базу
+                    if not self.db.get_user(user_id):
+                        self.db.add_user(user_id)
+                    
                     # Отправляем приветственное сообщение
                     welcome_text = f"""
 👋 Добро пожаловать, {new_member.first_name}!
@@ -229,7 +440,10 @@ class RobloxVerificationBot:
         # Отправляем сообщение об успехе
         join_date = user_data.get('created', 'Неизвестно')
         if join_date != 'Неизвестно':
-            join_date = datetime.fromisoformat(join_date.replace('Z', '+00:00')).strftime('%d.%m.%Y')
+            try:
+                join_date = datetime.fromisoformat(join_date.replace('Z', '+00:00')).strftime('%d.%m.%Y')
+            except:
+                join_date = 'Неизвестно'
         
         success_message = Config.SUCCESS_MESSAGE.format(
             username=user_data['name'],
@@ -242,25 +456,30 @@ class RobloxVerificationBot:
             parse_mode='Markdown'
         )
         
-        # Имитируем отправку запроса в друзья
+        # Сообщение о завершении верификации
         await update.message.reply_text(Text.FRIEND_REQUEST_SENT)
         
         logger.info(f"User {user_id} verified as Roblox user {user_data['name']} (ID: {user_data['id']})")
     
     def extract_username(self, input_text: str) -> str:
         """Извлекает username из текста"""
+        import re
+        
+        # Если это ссылка
         if 'roblox.com/users/' in input_text:
-            import re
             match = re.search(r'roblox\.com/users/(\d+)/', input_text)
             if match:
-                return self.get_username_from_id(match.group(1))
+                username = self.get_username_from_id(match.group(1))
+                return username
         
+        # Если это упоминание или просто текст
         input_text = input_text.replace('@', '').strip()
         return input_text if input_text else None
     
     def get_roblox_user(self, username: str) -> dict:
         """Получает данные пользователя Roblox через API"""
         try:
+            # Прямой поиск по username
             url = f"https://users.roblox.com/v1/users/search"
             params = {'keyword': username, 'limit': 1}
             
@@ -274,8 +493,24 @@ class RobloxVerificationBot:
                         'id': user.get('id'),
                         'name': user.get('name'),
                         'displayName': user.get('displayName'),
-                        'created': user.get('created')
+                        'created': user.get('created', 'Неизвестно')
                     }
+            
+            # Альтернативный метод - поиск по точному имени
+            url = f"https://api.roblox.com/users/get-by-username"
+            params = {'username': username}
+            
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                user = response.json()
+                if user.get('Id'):
+                    return {
+                        'id': user.get('Id'),
+                        'name': user.get('Username'),
+                        'displayName': user.get('DisplayName', user.get('Username')),
+                        'created': 'Неизвестно'
+                    }
+                    
         except Exception as e:
             logger.error(f"Error fetching Roblox user {username}: {e}")
         
@@ -326,6 +561,9 @@ class RobloxVerificationBot:
             
             elif callback_data == "admin_back":
                 await self.show_admin_panel(update)
+            
+            elif callback_data == "start_menu":
+                await self.start_command(update, context)
                 
         except Exception as e:
             logger.error(f"Error handling callback: {e}")
@@ -347,8 +585,7 @@ class RobloxVerificationBot:
         
         keyboard = [
             [InlineKeyboardButton(Text.STATS, callback_data="admin_stats")],
-            [InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users")],
-            [InlineKeyboardButton("📢 Сделать рассылку", callback_data="admin_broadcast")],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="admin_panel")],
             [InlineKeyboardButton(Text.BACK, callback_data="start_menu")]
         ]
         
@@ -372,7 +609,7 @@ class RobloxVerificationBot:
 👥 **Пользователи:**
 ├ Всего: {stats['total_users']}
 ├ Верифицировано: {stats['verified_users']}
-├ Ожидают: {stats['total_users'] - stats['verified_users']}
+├ Ожидают: {stats['total_users'] - stats['verified_users'] - stats['banned_users']}
 └ Заблокировано: {stats['banned_users']}
 
 ⚡ **Система:**
@@ -381,28 +618,13 @@ class RobloxVerificationBot:
 └ API Roblox: 🟢 Доступно
         """
         
-        keyboard = [[InlineKeyboardButton(Text.BACK, callback_data="admin_panel")]]
+        keyboard = [
+            [InlineKeyboardButton(Text.BACK, callback_data="admin_panel")],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.callback_query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
-    
-    async def run_webhook(self):
-        """Запуск бота через webhook (для Bothost)"""
-        try:
-            # Получаем URL вебхука от Bothost
-            webhook_url = os.getenv('WEBHOOK_URL', '')
-            
-            if webhook_url:
-                await self.application.bot.set_webhook(webhook_url)
-                logger.info(f"Webhook set to: {webhook_url}")
-            else:
-                logger.info("Starting polling mode")
-                
-            await self.application.run_polling()
-            
-        except Exception as e:
-            logger.error(f"Error running bot: {e}")
-            raise
     
     def run(self):
         """Запуск бота"""
@@ -412,9 +634,10 @@ class RobloxVerificationBot:
                 self.db.add_admin(admin_id, f"admin_{admin_id}")
             
             logger.info("Starting Roblox Verification Bot...")
+            logger.info(f"Admins: {Config.ADMIN_IDS}")
             
-            # Запускаем бота
-            asyncio.run(self.run_webhook())
+            # Запускаем бота в режиме polling
+            self.application.run_polling()
             
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
