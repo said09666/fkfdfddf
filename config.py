@@ -5,10 +5,10 @@ load_dotenv()
 
 class Config:
     # Telegram Bot Token
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    BOT_TOKEN = os.getenv('8567807699:AAH6fybbxl6lXd3MyojYIRFjPjbO8GNoc30')
     
     # Admin IDs
-    ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '123456789').split(',') if x]
+    ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '8214687269').split(',') if x]
     
     # Database
     DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///bot_database.db')
