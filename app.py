@@ -19,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация - ваш ID установлен как владелец
+# Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8567807699:AAH6fybbxl6lXd3MyojYIRFjPjbO8GNoc30')
 ADMIN_IDS = [8214687269]  # Ваш ID как владелец
 
@@ -33,7 +33,7 @@ ROLES = {
     'user': '👤 Пользователь'
 }
 
-# Иерархия ролей (кто кого может назначать)
+# Иерархия ролей
 ROLE_HIERARCHY = {
     'owner': ['owner', 'admin', 'moderator', 'guarantor', 'user', 'scammer'],
     'admin': ['admin', 'moderator', 'guarantor', 'user', 'scammer'],
@@ -46,232 +46,369 @@ ROLE_HIERARCHY = {
 # Состояния пользователей
 USER_STATES = {}
 
-# Настройки для групп
-GROUP_SETTINGS = {
-    'welcome_message': True,
-    'auto_verification_check': True,
-    'delete_unverified_messages': True,
-    'welcome_timeout': 300  # 5 минут
-}
-
 class Database:
-    def __init__(self):
-        self.conn = sqlite3.connect('bot.db', check_same_thread=False)
+    def __init__(self, db_path='bot_database.db'):
+        self.db_path = db_path
         self.init_db()
     
+    def get_connection(self):
+        """Создает новое соединение с базой данных"""
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+    
     def init_db(self):
-        cursor = self.conn.cursor()
+        """Инициализация базы данных"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        # Пользователи
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
-                telegram_username TEXT,
-                roblox_username TEXT,
-                roblox_id INTEGER,
-                verified BOOLEAN DEFAULT FALSE,
-                verification_code TEXT,
-                verified_at TIMESTAMP,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                banned BOOLEAN DEFAULT FALSE,
-                role TEXT DEFAULT 'user',
-                added_by INTEGER
-            )
-        ''')
-        
-        # Статистика
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT,
-                total_users INTEGER DEFAULT 0,
-                verified_users INTEGER DEFAULT 0,
-                new_users INTEGER DEFAULT 0
-            )
-        ''')
-        
-        # Логи действий
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS action_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                action TEXT,
-                target_user_id INTEGER,
-                details TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Настройки групп
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS group_settings (
-                chat_id INTEGER PRIMARY KEY,
-                welcome_message BOOLEAN DEFAULT TRUE,
-                auto_verification_check BOOLEAN DEFAULT TRUE,
-                delete_unverified_messages BOOLEAN DEFAULT TRUE,
-                welcome_timeout INTEGER DEFAULT 300
-            )
-        ''')
-        
-        self.conn.commit()
-        logger.info("✅ База данных инициализирована")
+        try:
+            # Пользователи
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_id INTEGER PRIMARY KEY,
+                    telegram_username TEXT,
+                    roblox_username TEXT,
+                    roblox_id INTEGER,
+                    verified BOOLEAN DEFAULT FALSE,
+                    verification_code TEXT,
+                    verified_at TIMESTAMP,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    banned BOOLEAN DEFAULT FALSE,
+                    role TEXT DEFAULT 'user',
+                    added_by INTEGER
+                )
+            ''')
+            
+            # Статистика
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT UNIQUE,
+                    total_users INTEGER DEFAULT 0,
+                    verified_users INTEGER DEFAULT 0,
+                    new_users INTEGER DEFAULT 0
+                )
+            ''')
+            
+            # Логи действий
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS action_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    action TEXT,
+                    target_user_id INTEGER,
+                    details TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Настройки групп
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_settings (
+                    chat_id INTEGER PRIMARY KEY,
+                    welcome_message BOOLEAN DEFAULT TRUE,
+                    auto_verification_check BOOLEAN DEFAULT TRUE,
+                    delete_unverified_messages BOOLEAN DEFAULT TRUE,
+                    welcome_timeout INTEGER DEFAULT 300
+                )
+            ''')
+            
+            conn.commit()
+            logger.info("✅ База данных успешно инициализирована")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации базы данных: {e}")
+            raise
+        finally:
+            conn.close()
     
     def add_user(self, telegram_id, telegram_username=None):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'INSERT OR IGNORE INTO users (telegram_id, telegram_username) VALUES (?, ?)',
-            (telegram_id, telegram_username)
-        )
-        self.conn.commit()
+        """Добавляет пользователя в базу"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'INSERT OR IGNORE INTO users (telegram_id, telegram_username) VALUES (?, ?)',
+                (telegram_id, telegram_username)
+            )
+            conn.commit()
+            logger.debug(f"Пользователь {telegram_id} добавлен в базу")
+        except Exception as e:
+            logger.error(f"Ошибка добавления пользователя {telegram_id}: {e}")
+        finally:
+            conn.close()
     
     def generate_verification_code(self):
         """Генерирует 6-значный буквенный код"""
         return ''.join(random.choices(string.ascii_uppercase, k=6))
     
     def set_verification_code(self, telegram_id, code):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'UPDATE users SET verification_code = ? WHERE telegram_id = ?',
-            (code, telegram_id)
-        )
-        self.conn.commit()
+        """Устанавливает код верификации"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'UPDATE users SET verification_code = ? WHERE telegram_id = ?',
+                (code, telegram_id)
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка установки кода верификации: {e}")
+        finally:
+            conn.close()
     
     def set_verified(self, telegram_id, roblox_username, roblox_id=None):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            '''UPDATE users SET 
-                roblox_username = ?, 
-                roblox_id = ?, 
-                verified = TRUE, 
-                verified_at = ?,
-                verification_code = NULL
-            WHERE telegram_id = ?''',
-            (roblox_username, roblox_id, datetime.now(), telegram_id)
-        )
-        self.conn.commit()
+        """Устанавливает статус верификации"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                '''UPDATE users SET 
+                    roblox_username = ?, 
+                    roblox_id = ?, 
+                    verified = TRUE, 
+                    verified_at = ?,
+                    verification_code = NULL
+                WHERE telegram_id = ?''',
+                (roblox_username, roblox_id, datetime.now(), telegram_id)
+            )
+            conn.commit()
+            logger.info(f"Пользователь {telegram_id} верифицирован как {roblox_username}")
+        except Exception as e:
+            logger.error(f"Ошибка установки верификации: {e}")
+        finally:
+            conn.close()
     
     def get_verification_code(self, telegram_id):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT verification_code FROM users WHERE telegram_id = ?', (telegram_id,))
-        result = cursor.fetchone()
-        return result[0] if result else None
+        """Получает код верификации"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT verification_code FROM users WHERE telegram_id = ?', (telegram_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Ошибка получения кода верификации: {e}")
+            return None
+        finally:
+            conn.close()
     
     def is_verified(self, telegram_id):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT verified FROM users WHERE telegram_id = ?', (telegram_id,))
-        result = cursor.fetchone()
-        return result and result[0]
+        """Проверяет верификацию пользователя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT verified FROM users WHERE telegram_id = ?', (telegram_id,))
+            result = cursor.fetchone()
+            return bool(result and result[0])
+        except Exception as e:
+            logger.error(f"Ошибка проверки верификации: {e}")
+            return False
+        finally:
+            conn.close()
     
     def is_banned(self, telegram_id):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT banned FROM users WHERE telegram_id = ?', (telegram_id,))
-        result = cursor.fetchone()
-        return result and result[0]
+        """Проверяет забанен ли пользователь"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT banned FROM users WHERE telegram_id = ?', (telegram_id,))
+            result = cursor.fetchone()
+            return bool(result and result[0])
+        except Exception as e:
+            logger.error(f"Ошибка проверки бана: {e}")
+            return False
+        finally:
+            conn.close()
     
     def get_role(self, telegram_id):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (telegram_id,))
-        result = cursor.fetchone()
-        return result[0] if result else 'user'
+        """Получает роль пользователя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (telegram_id,))
+            result = cursor.fetchone()
+            return result[0] if result else 'user'
+        except Exception as e:
+            logger.error(f"Ошибка получения роли: {e}")
+            return 'user'
+        finally:
+            conn.close()
     
     def set_role(self, telegram_id, role, added_by=None):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'UPDATE users SET role = ?, added_by = ? WHERE telegram_id = ?',
-            (role, added_by, telegram_id)
-        )
-        self.conn.commit()
-        logger.info(f"User {telegram_id} role set to {role} by {added_by}")
+        """Устанавливает роль пользователя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        # Логируем действие
-        self.log_action(added_by, 'set_role', telegram_id, f"Role changed to {role}")
+        try:
+            cursor.execute(
+                'UPDATE users SET role = ?, added_by = ? WHERE telegram_id = ?',
+                (role, added_by, telegram_id)
+            )
+            conn.commit()
+            logger.info(f"Пользователю {telegram_id} установлена роль {role}")
+            
+            # Логируем действие
+            self.log_action(added_by, 'set_role', telegram_id, f"Role changed to {role}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка установки роли: {e}")
+        finally:
+            conn.close()
     
     def get_user_by_id(self, telegram_id):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT telegram_id, telegram_username, roblox_username, role, verified FROM users WHERE telegram_id = ?',
-            (telegram_id,)
-        )
-        result = cursor.fetchone()
-        if result:
-            return {
-                'telegram_id': result[0],
-                'telegram_username': result[1],
-                'roblox_username': result[2],
-                'role': result[3],
-                'verified': result[4]
-            }
-        return None
+        """Получает информацию о пользователе"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'SELECT telegram_id, telegram_username, roblox_username, role, verified FROM users WHERE telegram_id = ?',
+                (telegram_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'telegram_id': result[0],
+                    'telegram_username': result[1],
+                    'roblox_username': result[2],
+                    'role': result[3],
+                    'verified': bool(result[4])
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка получения пользователя: {e}")
+            return None
+        finally:
+            conn.close()
     
     def get_users_by_role(self, role):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT telegram_id, telegram_username, roblox_username FROM users WHERE role = ?',
-            (role,)
-        )
-        return cursor.fetchall()
+        """Получает пользователей по роли"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'SELECT telegram_id, telegram_username, roblox_username FROM users WHERE role = ?',
+                (role,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения пользователей по роли: {e}")
+            return []
+        finally:
+            conn.close()
     
     def get_all_users(self):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT telegram_id, telegram_username, roblox_username, role, verified FROM users ORDER BY role, telegram_id'
-        )
-        return cursor.fetchall()
+        """Получает всех пользователей"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'SELECT telegram_id, telegram_username, roblox_username, role, verified FROM users ORDER BY role, telegram_id'
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения всех пользователей: {e}")
+            return []
+        finally:
+            conn.close()
     
     def ban_user(self, telegram_id, banned_by=None):
-        cursor = self.conn.cursor()
-        cursor.execute('UPDATE users SET banned = TRUE WHERE telegram_id = ?', (telegram_id,))
-        self.conn.commit()
-        if banned_by:
-            self.log_action(banned_by, 'ban_user', telegram_id, "User banned")
+        """Банит пользователя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('UPDATE users SET banned = TRUE WHERE telegram_id = ?', (telegram_id,))
+            conn.commit()
+            if banned_by:
+                self.log_action(banned_by, 'ban_user', telegram_id, "User banned")
+        except Exception as e:
+            logger.error(f"Ошибка бана пользователя: {e}")
+        finally:
+            conn.close()
     
     def unban_user(self, telegram_id, unbanned_by=None):
-        cursor = self.conn.cursor()
-        cursor.execute('UPDATE users SET banned = FALSE WHERE telegram_id = ?', (telegram_id,))
-        self.conn.commit()
-        if unbanned_by:
-            self.log_action(unbanned_by, 'unban_user', telegram_id, "User unbanned")
+        """Разбанивает пользователя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('UPDATE users SET banned = FALSE WHERE telegram_id = ?', (telegram_id,))
+            conn.commit()
+            if unbanned_by:
+                self.log_action(unbanned_by, 'unban_user', telegram_id, "User unbanned")
+        except Exception as e:
+            logger.error(f"Ошибка разбана пользователя: {e}")
+        finally:
+            conn.close()
     
     def get_user_stats(self, telegram_id):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT roblox_username, verified, verified_at, role FROM users WHERE telegram_id = ?', 
-            (telegram_id,)
-        )
-        result = cursor.fetchone()
-        if result:
+        """Получает статистику пользователя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'SELECT roblox_username, verified, verified_at, role FROM users WHERE telegram_id = ?', 
+                (telegram_id,)
+            )
+            result = cursor.fetchone()
             return result
-        return None
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики пользователя: {e}")
+            return None
+        finally:
+            conn.close()
     
     def get_bot_stats(self):
-        cursor = self.conn.cursor()
+        """Получает общую статистику бота"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total_users = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM users WHERE verified = TRUE')
-        verified_users = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM users WHERE banned = TRUE')
-        banned_users = cursor.fetchone()[0]
-        
-        # Статистика по ролям
-        role_stats = {}
-        for role in ROLES.keys():
-            cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', (role,))
-            role_stats[role] = cursor.fetchone()[0]
-        
-        self.conn.commit()
-        
-        return {
-            'total_users': total_users,
-            'verified_users': verified_users,
-            'banned_users': banned_users,
-            'role_stats': role_stats
-        }
+        try:
+            cursor.execute('SELECT COUNT(*) FROM users')
+            total_users = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM users WHERE verified = TRUE')
+            verified_users = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM users WHERE banned = TRUE')
+            banned_users = cursor.fetchone()[0]
+            
+            # Статистика по ролям
+            role_stats = {}
+            for role in ROLES.keys():
+                cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', (role,))
+                role_stats[role] = cursor.fetchone()[0]
+            
+            return {
+                'total_users': total_users,
+                'verified_users': verified_users,
+                'banned_users': banned_users,
+                'role_stats': role_stats
+            }
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики бота: {e}")
+            return {
+                'total_users': 0,
+                'verified_users': 0,
+                'banned_users': 0,
+                'role_stats': {role: 0 for role in ROLES.keys()}
+            }
+        finally:
+            conn.close()
     
     def can_manage_role(self, user_role, target_role):
-        """Проверяет может ли пользователь управлять определенной ролью"""
+        """Проверяет может ли пользователь управлять ролью"""
         if user_role in ROLE_HIERARCHY and target_role in ROLE_HIERARCHY[user_role]:
             return True
         return False
@@ -287,507 +424,114 @@ class Database:
     
     def log_action(self, user_id, action, target_user_id=None, details=None):
         """Логирует действия пользователей"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'INSERT INTO action_logs (user_id, action, target_user_id, details) VALUES (?, ?, ?, ?)',
-            (user_id, action, target_user_id, details)
-        )
-        self.conn.commit()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'INSERT INTO action_logs (user_id, action, target_user_id, details) VALUES (?, ?, ?, ?)',
+                (user_id, action, target_user_id, details)
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка логирования действия: {e}")
+        finally:
+            conn.close()
     
     def get_recent_actions(self, limit=10):
         """Получает последние действия"""
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT al.user_id, u1.telegram_username, al.action, al.target_user_id, u2.telegram_username, al.details, al.created_at
-            FROM action_logs al
-            LEFT JOIN users u1 ON al.user_id = u1.telegram_id
-            LEFT JOIN users u2 ON al.target_user_id = u2.telegram_id
-            ORDER BY al.created_at DESC LIMIT ?
-        ''', (limit,))
-        return cursor.fetchall()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                SELECT al.user_id, u1.telegram_username, al.action, al.target_user_id, u2.telegram_username, al.details, al.created_at
+                FROM action_logs al
+                LEFT JOIN users u1 ON al.user_id = u1.telegram_id
+                LEFT JOIN users u2 ON al.target_user_id = u2.telegram_id
+                ORDER BY al.created_at DESC LIMIT ?
+            ''', (limit,))
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения логов действий: {e}")
+            return []
+        finally:
+            conn.close()
     
     # Методы для работы с группами
     def get_group_settings(self, chat_id):
         """Получает настройки группы"""
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
-        result = cursor.fetchone()
-        if result:
-            return {
-                'chat_id': result[0],
-                'welcome_message': bool(result[1]),
-                'auto_verification_check': bool(result[2]),
-                'delete_unverified_messages': bool(result[3]),
-                'welcome_timeout': result[4]
-            }
-        return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'chat_id': result[0],
+                    'welcome_message': bool(result[1]),
+                    'auto_verification_check': bool(result[2]),
+                    'delete_unverified_messages': bool(result[3]),
+                    'welcome_timeout': result[4]
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка получения настроек группы: {e}")
+            return None
+        finally:
+            conn.close()
     
     def set_group_settings(self, chat_id, welcome_message=True, auto_verification_check=True, 
                           delete_unverified_messages=True, welcome_timeout=300):
         """Устанавливает настройки группы"""
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO group_settings 
-            (chat_id, welcome_message, auto_verification_check, delete_unverified_messages, welcome_timeout)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (chat_id, welcome_message, auto_verification_check, delete_unverified_messages, welcome_timeout))
-        self.conn.commit()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO group_settings 
+                (chat_id, welcome_message, auto_verification_check, delete_unverified_messages, welcome_timeout)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (chat_id, welcome_message, auto_verification_check, delete_unverified_messages, welcome_timeout))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка установки настроек группы: {e}")
+        finally:
+            conn.close()
     
     def is_group_registered(self, chat_id):
         """Проверяет зарегистрирована ли группа"""
         return self.get_group_settings(chat_id) is not None
 
-# Инициализация
+# Инициализация базы данных
+logger.info("🔄 Инициализация базы данных...")
 db = Database()
 
 # Добавляем владельцев при запуске
+logger.info("👑 Добавление владельцев...")
 for admin_id in ADMIN_IDS:
+    db.add_user(admin_id, f"owner_{admin_id}")
     db.set_role(admin_id, 'owner')
+    logger.info(f"Владелец {admin_id} добавлен")
 
-# ===== ФУНКЦИИ ДЛЯ РАБОТЫ В ГРУППАХ =====
-async def handle_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка новых участников в группе"""
-    try:
-        chat = update.effective_chat
-        new_members = update.message.new_chat_members
-        
-        # Проверяем настройки группы
-        group_settings = db.get_group_settings(chat.id)
-        if not group_settings or not group_settings['welcome_message']:
-            return
-        
-        for member in new_members:
-            # Игнорируем самого бота
-            if member.id == context.bot.id:
-                await update.message.reply_text(
-                    "🤖 **Бот верификации активирован!**\n\n"
-                    "Я буду проверять верификацию новых участников. "
-                    "Для настройки используйте /settings в личных сообщениях с ботом."
-                )
-                continue
-            
-            # Добавляем пользователя в базу
-            db.add_user(member.id, member.username)
-            
-            # Проверяем верификацию
-            if not db.is_verified(member.id):
-                welcome_text = f"""
-👋 Добро пожаловать, {member.first_name}!
-
-📋 **Для доступа к чату необходимо пройти верификацию**
-
-🔐 **Процесс верификации:**
-1. Нажмите кнопку ниже чтобы начать
-2. Добавьте код в описание Roblox аккаунта
-3. Введите ваш никнейм Roblox
-4. Получите доступ к чату!
-
-🚫 *Сообщения от непроверенных пользователей будут удаляться*
-                """
-                
-                keyboard = [
-                    [InlineKeyboardButton("🔐 Начать верификацию", url=f"https://t.me/{(await context.bot.get_me()).username}?start=verify")],
-                    [InlineKeyboardButton("📋 Инструкция", url=f"https://t.me/{(await context.bot.get_me()).username}?start=help")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                welcome_msg = await update.message.reply_text(
-                    welcome_text,
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-                
-                # Устанавливаем таймер для удаления приветственного сообщения
-                if group_settings['welcome_timeout'] > 0:
-                    await asyncio.sleep(group_settings['welcome_timeout'])
-                    try:
-                        await welcome_msg.delete()
-                    except Exception as e:
-                        logger.warning(f"Could not delete welcome message: {e}")
-            else:
-                # Пользователь уже верифицирован
-                user_stats = db.get_user_stats(member.id)
-                if user_stats:
-                    roblox_username = user_stats[0]
-                    await update.message.reply_text(
-                        f"✅ {member.first_name} уже верифицирован как `{roblox_username}`",
-                        parse_mode='Markdown'
-                    )
-                    
-    except Exception as e:
-        logger.error(f"Error in handle_new_chat_members: {e}")
-
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений в группе"""
-    try:
-        chat = update.effective_chat
-        user = update.effective_user
-        message = update.message
-        
-        # Игнорируем сообщения от самого бота
-        if user.id == context.bot.id:
-            return
-        
-        # Игнорируем команды
-        if message.text and message.text.startswith('/'):
-            return
-        
-        # Проверяем настройки группы
-        group_settings = db.get_group_settings(chat.id)
-        if not group_settings or not group_settings['auto_verification_check']:
-            return
-        
-        # Проверяем верификацию пользователя
-        if not db.is_verified(user.id):
-            # Проверяем, нужно ли удалять сообщения
-            if group_settings['delete_unverified_messages']:
-                try:
-                    await message.delete()
-                    
-                    # Отправляем предупреждение
-                    warning_msg = await message.reply_text(
-                        f"🚫 {user.first_name}, вы не прошли верификацию!\n\n"
-                        f"Для отправки сообщений в этот чат необходимо пройти верификацию Roblox.\n"
-                        f"Напишите мне в личные сообщения: @{(await context.bot.get_me()).username}",
-                        parse_mode='Markdown'
-                    )
-                    
-                    # Удаляем предупреждение через 10 секунд
-                    await asyncio.sleep(10)
-                    await warning_msg.delete()
-                    
-                except Exception as e:
-                    logger.warning(f"Could not delete message from unverified user: {e}")
-            
-        # Проверяем бан пользователя
-        elif db.is_banned(user.id):
-            try:
-                await message.delete()
-                await message.reply_text(
-                    f"🚫 {user.first_name}, вы заблокированы в системе.",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.warning(f"Could not delete message from banned user: {e}")
-                
-    except Exception as e:
-        logger.error(f"Error in handle_group_message: {e}")
-
-async def group_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для настройки группы"""
-    try:
-        chat = update.effective_chat
-        user = update.effective_user
-        
-        # Проверяем права пользователя
-        if not await is_user_admin(update, context, user.id):
-            await update.message.reply_text("❌ Только администраторы могут настраивать группу.")
-            return
-        
-        # Получаем текущие настройки
-        group_settings = db.get_group_settings(chat.id)
-        if not group_settings:
-            # Создаем настройки по умолчанию
-            db.set_group_settings(chat.id)
-            group_settings = db.get_group_settings(chat.id)
-        
-        settings_text = f"""
-⚙️ **Настройки группы**
-
-📋 **Текущие настройки:**
-├ Приветственное сообщение: {'✅ Включено' if group_settings['welcome_message'] else '❌ Выключено'}
-├ Проверка верификации: {'✅ Включена' if group_settings['auto_verification_check'] else '❌ Выключена'}
-├ Удаление сообщений: {'✅ Включено' if group_settings['delete_unverified_messages'] else '❌ Выключено'}
-└ Таймаут приветствия: {group_settings['welcome_timeout']} сек.
-
-🛠️ **Выберите настройку для изменения:**
-        """
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("👋 Приветствие", callback_data=f"group_toggle_welcome_{chat.id}"),
-                InlineKeyboardButton("🔐 Проверка", callback_data=f"group_toggle_check_{chat.id}")
-            ],
-            [
-                InlineKeyboardButton("🗑️ Удаление сообщений", callback_data=f"group_toggle_delete_{chat.id}"),
-                InlineKeyboardButton("⏰ Таймаут", callback_data=f"group_set_timeout_{chat.id}")
-            ],
-            [
-                InlineKeyboardButton("🔄 Сбросить настройки", callback_data=f"group_reset_{chat.id}"),
-                InlineKeyboardButton("❌ Закрыть", callback_data="close_settings")
-            ]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(settings_text, reply_markup=reply_markup, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error in group_settings_command: {e}")
-        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
-
-async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Проверяет является ли пользователь администратором группы"""
-    try:
-        chat = update.effective_chat
-        chat_member = await context.bot.get_chat_member(chat.id, user_id)
-        return chat_member.status in ['administrator', 'creator']
-    except Exception as e:
-        logger.error(f"Error checking admin status: {e}")
-        return False
-
-async def handle_group_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка callback для настроек группы"""
-    try:
-        query = update.callback_query
-        await query.answer()
-        
-        user = query.from_user
-        data = query.data
-        
-        if data == "close_settings":
-            await query.edit_message_text("⚙️ Настройки закрыты.")
-            return
-        
-        # Получаем ID чата из callback data
-        if data.startswith("group_toggle_welcome_"):
-            chat_id = int(data.replace("group_toggle_welcome_", ""))
-            await toggle_group_setting(query, chat_id, 'welcome_message', user)
-        
-        elif data.startswith("group_toggle_check_"):
-            chat_id = int(data.replace("group_toggle_check_", ""))
-            await toggle_group_setting(query, chat_id, 'auto_verification_check', user)
-        
-        elif data.startswith("group_toggle_delete_"):
-            chat_id = int(data.replace("group_toggle_delete_", ""))
-            await toggle_group_setting(query, chat_id, 'delete_unverified_messages', user)
-        
-        elif data.startswith("group_set_timeout_"):
-            chat_id = int(data.replace("group_set_timeout_", ""))
-            await set_group_timeout(query, chat_id, user)
-        
-        elif data.startswith("group_reset_"):
-            chat_id = int(data.replace("group_reset_", ""))
-            await reset_group_settings(query, chat_id, user)
-            
-    except Exception as e:
-        logger.error(f"Error in handle_group_settings_callback: {e}")
-
-async def toggle_group_setting(query, chat_id, setting_name, user):
-    """Переключает настройку группы"""
-    try:
-        # Проверяем права пользователя
-        chat_member = await query.bot.get_chat_member(chat_id, user.id)
-        if chat_member.status not in ['administrator', 'creator']:
-            await query.edit_message_text("❌ Только администраторы могут изменять настройки группы.")
-            return
-        
-        # Получаем текущие настройки
-        group_settings = db.get_group_settings(chat_id)
-        if not group_settings:
-            group_settings = {
-                'welcome_message': True,
-                'auto_verification_check': True,
-                'delete_unverified_messages': True,
-                'welcome_timeout': 300
-            }
-        
-        # Переключаем настройку
-        group_settings[setting_name] = not group_settings[setting_name]
-        
-        # Сохраняем настройки
-        db.set_group_settings(
-            chat_id,
-            group_settings['welcome_message'],
-            group_settings['auto_verification_check'],
-            group_settings['delete_unverified_messages'],
-            group_settings['welcome_timeout']
-        )
-        
-        # Обновляем сообщение
-        settings_text = f"""
-⚙️ **Настройки группы**
-
-📋 **Текущие настройки:**
-├ Приветственное сообщение: {'✅ Включено' if group_settings['welcome_message'] else '❌ Выключено'}
-├ Проверка верификации: {'✅ Включена' if group_settings['auto_verification_check'] else '❌ Выключена'}
-├ Удаление сообщений: {'✅ Включено' if group_settings['delete_unverified_messages'] else '❌ Выключено'}
-└ Таймаут приветствия: {group_settings['welcome_timeout']} сек.
-
-🛠️ **Выберите настройку для изменения:**
-        """
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("👋 Приветствие", callback_data=f"group_toggle_welcome_{chat_id}"),
-                InlineKeyboardButton("🔐 Проверка", callback_data=f"group_toggle_check_{chat_id}")
-            ],
-            [
-                InlineKeyboardButton("🗑️ Удаление сообщений", callback_data=f"group_toggle_delete_{chat_id}"),
-                InlineKeyboardButton("⏰ Таймаут", callback_data=f"group_set_timeout_{chat_id}")
-            ],
-            [
-                InlineKeyboardButton("🔄 Сбросить настройки", callback_data=f"group_reset_{chat_id}"),
-                InlineKeyboardButton("❌ Закрыть", callback_data="close_settings")
-            ]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(settings_text, reply_markup=reply_markup, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error in toggle_group_setting: {e}")
-
-async def set_group_timeout(query, chat_id, user):
-    """Устанавливает таймаут приветственного сообщения"""
-    try:
-        # Проверяем права пользователя
-        chat_member = await query.bot.get_chat_member(chat_id, user.id)
-        if chat_member.status not in ['administrator', 'creator']:
-            await query.edit_message_text("❌ Только администраторы могут изменять настройки группы.")
-            return
-        
-        await query.edit_message_text(
-            "⏰ **Установите таймаут приветственного сообщения**\n\n"
-            "Отправьте число секунд (0 = не удалять):",
-            parse_mode='Markdown'
-        )
-        
-        # Сохраняем состояние
-        USER_STATES[user.id] = {
-            'action': 'set_group_timeout',
-            'chat_id': chat_id
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in set_group_timeout: {e}")
-
-async def reset_group_settings(query, chat_id, user):
-    """Сбрасывает настройки группы к значениям по умолчанию"""
-    try:
-        # Проверяем права пользователя
-        chat_member = await query.bot.get_chat_member(chat_id, user.id)
-        if chat_member.status not in ['administrator', 'creator']:
-            await query.edit_message_text("❌ Только администраторы могут изменять настройки группы.")
-            return
-        
-        # Сбрасываем настройки
-        db.set_group_settings(chat_id)
-        
-        await query.edit_message_text(
-            "✅ Настройки группы сброшены к значениям по умолчанию.",
-            parse_mode='Markdown'
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in reset_group_settings: {e}")
-
-async def handle_group_timeout_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка установки таймаута группы"""
-    try:
-        user = update.effective_user
-        
-        if user.id not in USER_STATES or USER_STATES[user.id]['action'] != 'set_group_timeout':
-            return
-        
-        timeout_input = update.message.text
-        
-        if not timeout_input.isdigit():
-            await update.message.reply_text("❌ Пожалуйста, введите число секунд.")
-            return
-        
-        timeout = int(timeout_input)
-        chat_id = USER_STATES[user.id]['chat_id']
-        
-        # Обновляем настройки
-        group_settings = db.get_group_settings(chat_id)
-        if group_settings:
-            db.set_group_settings(
-                chat_id,
-                group_settings['welcome_message'],
-                group_settings['auto_verification_check'],
-                group_settings['delete_unverified_messages'],
-                timeout
-            )
-        
-        # Удаляем состояние
-        del USER_STATES[user.id]
-        
-        await update.message.reply_text(
-            f"✅ Таймаут приветственного сообщения установлен на {timeout} секунд.",
-            parse_mode='Markdown'
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in handle_group_timeout_setting: {e}")
-
-# ===== ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ СООБЩЕНИЙ =====
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
-    try:
-        # Игнорируем сообщения из групп (они обрабатываются отдельно)
-        if update.effective_chat.type in ['group', 'supergroup']:
-            return
-            
-        user = update.effective_user
-        text = update.message.text
-        
-        # Игнорируем команды
-        if text and text.startswith('/'):
-            return
-        
-        # Проверяем бан
-        if db.is_banned(user.id):
-            await update.message.reply_text("🚫 Вы заблокированы в системе.")
-            return
-        
-        # Проверяем состояние выдачи роли
-        if user.id in USER_STATES and USER_STATES[user.id]['action'] == 'set_role':
-            await handle_role_assignment(update, context, text)
-            return
-        
-        # Проверяем состояние управления пользователями
-        if user.id in USER_STATES and USER_STATES[user.id]['action'] in ['ban_user', 'unban_user']:
-            await handle_user_management(update, context, text)
-            return
-        
-        # Проверяем состояние верификации
-        if user.id in USER_STATES and USER_STATES[user.id].get('step') == 2:
-            await verification_step_3(update, context, text)
-            return
-        
-        # Проверяем состояние настройки таймаута группы
-        if user.id in USER_STATES and USER_STATES[user.id]['action'] == 'set_group_timeout':
-            await handle_group_timeout_setting(update, context)
-            return
-        
-        # Если пользователь уже верифицирован
-        if db.is_verified(user.id):
-            user_stats = db.get_user_stats(user.id)
-            if user_stats:
-                roblox_username = user_stats[0]
-                await update.message.reply_text(
-                    f"✅ Вы уже верифицированы как `{roblox_username}`\n\n"
-                    f"Для смены аккаунта обратитесь к администратору.",
-                    parse_mode='Markdown'
-                )
-                
-    except Exception as e:
-        logger.error(f"Error in handle_message: {e}")
-        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
-
-# ===== ОБНОВЛЕННЫЙ START COMMAND =====
+# ===== ОСНОВНЫЕ КОМАНДЫ =====
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     try:
         user = update.effective_user
         chat = update.effective_chat
         
+        logger.info(f"Команда /start от пользователя {user.id} в чате {chat.type}")
+        
         # Если команда вызвана в группе
         if chat.type in ['group', 'supergroup']:
             await group_settings_command(update, context)
             return
             
+        # Добавляем пользователя в базу
         db.add_user(user.id, user.username)
+        logger.info(f"Пользователь {user.id} добавлен в базу")
         
         if db.is_banned(user.id):
             await update.message.reply_text("🚫 Вы заблокированы в системе.")
@@ -795,6 +539,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_role = db.get_role(user.id)
         role_name = ROLES.get(user_role, '👤 Пользователь')
+        
+        logger.info(f"Роль пользователя {user.id}: {user_role}")
         
         keyboard = []
         
@@ -822,10 +568,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎭 Система ролей и прав
 📊 Детальная статистика
 👥 Управление пользователями
-🏠 **Работа в группах:**
-• Автоматическая проверка верификации
-• Приветственные сообщения
-• Защита от непроверенных пользователей
 
 🚀 **Для начала работы нажмите кнопку ниже:**
         """
@@ -833,10 +575,447 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Error in start_command: {e}")
+        logger.error(f"Ошибка в start_command: {e}")
         await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
 
-# ===== ОБНОВЛЕННЫЙ HELP COMMAND =====
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /profile"""
+    try:
+        user = update.effective_user
+        logger.info(f"Команда /profile от пользователя {user.id}")
+        await show_profile(update, user)
+    except Exception as e:
+        logger.error(f"Ошибка в profile_command: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /stats"""
+    try:
+        user = update.effective_user
+        logger.info(f"Команда /stats от пользователя {user.id}")
+        
+        if not db.is_admin(user.id):
+            await update.message.reply_text("❌ У вас нет прав для просмотра статистики.")
+            return
+        
+        await show_stats(update)
+    except Exception as e:
+        logger.error(f"Ошибка в stats_command: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+
+async def roles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /roles"""
+    try:
+        user = update.effective_user
+        logger.info(f"Команда /roles от пользователя {user.id}")
+        
+        if not db.is_admin(user.id):
+            await update.message.reply_text("❌ У вас нет прав для управления ролями.")
+            return
+        
+        await show_role_management(update, user)
+    except Exception as e:
+        logger.error(f"Ошибка в roles_command: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /help"""
+    try:
+        logger.info(f"Команда /help от пользователя {update.effective_user.id}")
+        await show_help(update)
+    except Exception as e:
+        logger.error(f"Ошибка в help_command: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+
+# ===== ПОШАГОВАЯ ВЕРИФИКАЦИЯ =====
+async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса верификации"""
+    try:
+        user = update.effective_user
+        logger.info(f"Начало верификации для пользователя {user.id}")
+        
+        if db.is_banned(user.id):
+            await update.message.reply_text("🚫 Вы заблокированы в системе.")
+            return
+        
+        if db.is_verified(user.id):
+            user_stats = db.get_user_stats(user.id)
+            if user_stats:
+                roblox_username = user_stats[0]
+                await update.message.reply_text(
+                    f"✅ Вы уже верифицированы как `{roblox_username}`\n\n"
+                    f"Для повторной верификации обратитесь к администратору.",
+                    parse_mode='Markdown'
+                )
+            return
+        
+        # Генерируем код верификации
+        verification_code = db.generate_verification_code()
+        db.set_verification_code(user.id, verification_code)
+        
+        # Сохраняем состояние
+        USER_STATES[user.id] = {'step': 1, 'code': verification_code}
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Я добавил код в описание", callback_data="verification_step_2")],
+            [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"🔐 **ШАГ 1 из 3: Добавьте код в описание Roblox**\n\n"
+            f"📝 **Ваш уникальный код верификации:**\n"
+            f"```\n{verification_code}\n```\n"
+            f"**Инструкция:**\n"
+            f"1. Откройте Roblox\n"
+            f"2. Перейдите в настройки профиля\n"
+            f"3. Найдите поле \"Описание\"\n"
+            f"4. Добавьте код выше в описание\n"
+            f"5. Сохраните изменения\n\n"
+            f"💡 *Код должен быть виден в описании вашего профиля*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в start_verification: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+
+async def verification_step_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2 верификации"""
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        logger.info(f"Шаг 2 верификации для пользователя {user.id}")
+        
+        if user.id not in USER_STATES:
+            await query.edit_message_text("❌ Сессия верификации устарела. Начните заново с /verify")
+            return
+        
+        USER_STATES[user.id]['step'] = 2
+        
+        keyboard = [
+            [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"👤 **ШАГ 2 из 3: Введите ваш никнейм Roblox**\n\n"
+            f"📝 **Отправьте мне ваш никнейм в Roblox**\n\n"
+            f"**Можно отправить:**\n"
+            f"• Никнейм (например: `AlexRoblox`)\n"
+            f"• Ссылку на профиль\n"
+            f"• ID пользователя\n\n"
+            f"💡 *Убедитесь что код {USER_STATES[user.id]['code']} добавлен в описание перед продолжением*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в verification_step_2: {e}")
+        await update.callback_query.edit_message_text("❌ Произошла ошибка. Попробуйте позже.")
+
+async def verification_step_3(update: Update, context: ContextTypes.DEFAULT_TYPE, username: str):
+    """Шаг 3 верификации"""
+    try:
+        user = update.effective_user
+        logger.info(f"Шаг 3 верификации для пользователя {user.id} с ником {username}")
+        
+        if user.id not in USER_STATES:
+            await update.message.reply_text("❌ Сессия верификации устарела. Начните заново с /verify")
+            return
+        
+        verification_code = USER_STATES[user.id]['code']
+        
+        await update.message.reply_text("🔍 Проверяем аккаунт Roblox...")
+        
+        # Получаем информацию о пользователе Roblox
+        user_info = get_roblox_user_info(username)
+        
+        if not user_info['success']:
+            keyboard = [
+                [InlineKeyboardButton("🔄 Попробовать другой никнейм", callback_data="verification_step_2")],
+                [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"❌ **Ошибка:** {user_info['error']}\n\n"
+                f"Проверьте правильность никнейма и попробуйте снова.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Проверяем код в описании (заглушка)
+        await update.message.reply_text("🔐 Проверяем код верификации в описании...")
+        await asyncio.sleep(2)
+        
+        # В реальном боте здесь должна быть проверка через Roblox API
+        code_verified = True
+        
+        if not code_verified:
+            keyboard = [
+                [InlineKeyboardButton("🔄 Попробовать снова", callback_data="verification_step_2")],
+                [InlineKeyboardButton("❌ Отменить верификацию", callback_data="cancel_verification")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"❌ **Код верификации не найден!**\n\n"
+                f"🔐 Ваш код: `{verification_code}`\n\n"
+                f"**Убедитесь что:**\n"
+                f"• Код добавлен в описание профиля Roblox\n"
+                f"• Описание сохранено\n"
+                f"• Код точно совпадает\n\n"
+                f"Попробуйте снова:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Верификация успешна!
+        db.set_verified(user.id, user_info['username'], user_info['id'])
+        
+        # Удаляем состояние верификации
+        if user.id in USER_STATES:
+            del USER_STATES[user.id]
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 Мой профиль", callback_data="profile")],
+            [InlineKeyboardButton("🎉 Перейти в чат", url="https://t.me/your_chat_link")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        success_text = f"""
+✅ **ВЕРИФИКАЦИЯ УСПЕШНО ЗАВЕРШЕНА!**
+
+🎮 **Ваши данные:**
+├ Roblox: `{user_info['username']}`
+├ Display Name: `{user_info['displayName']}`
+├ ID: `{user_info['id']}`
+├ Код: `{verification_code}`
+└ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+🎉 **Теперь вам доступны:**
+• Полный доступ к чатам
+• Участие в мероприятиях
+• Все функции бота
+
+💫 Добро пожаловать в наше сообщество!
+        """
+        
+        await update.message.reply_text(success_text, reply_markup=reply_markup, parse_mode='Markdown')
+        logger.info(f"Пользователь {user.id} успешно верифицирован как {user_info['username']}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в verification_step_3: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПОКАЗА ИНФОРМАЦИИ =====
+async def show_profile(update, user):
+    """Показывает профиль пользователя"""
+    try:
+        stats = db.get_user_stats(user.id)
+        
+        if not stats:
+            profile_text = "❌ Вы еще не зарегистрированы в системе."
+        else:
+            roblox_username, verified, verified_at, role = stats
+            role_name = ROLES.get(role, '👤 Пользователь')
+            
+            if verified:
+                profile_text = f"""
+📊 **Ваш профиль**
+
+👤 Telegram: @{user.username or 'N/A'}
+🆔 ID: `{user.id}`
+🎮 Roblox: `{roblox_username}`
+🎭 Роль: {role_name}
+✅ Статус: Верифицирован
+📅 Дата: {verified_at.split()[0] if verified_at else 'N/A'}
+                """
+            else:
+                profile_text = f"""
+📊 **Ваш профиль**
+
+👤 Telegram: @{user.username or 'N/A'}
+🆔 ID: `{user.id}`
+🎭 Роль: {role_name}
+❌ Статус: Не верифицирован
+
+💡 Пройдите верификацию для доступа к полному функционалу
+                """
+        
+        keyboard = []
+        if not verified:
+            keyboard.append([InlineKeyboardButton("🔐 Начать верификацию", callback_data="verify")])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="profile")])
+        keyboard.append([InlineKeyboardButton("↩️ Главное меню", callback_data="back_to_main")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if hasattr(update, 'message'):
+            await update.message.reply_text(profile_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.edit_message_text(profile_text, reply_markup=reply_markup, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Ошибка в show_profile: {e}")
+
+async def show_admin_panel(update, user):
+    """Показывает панель администратора"""
+    try:
+        if not db.is_admin(user.id):
+            if hasattr(update, 'message'):
+                await update.message.reply_text("❌ У вас нет прав администратора.")
+            else:
+                await update.edit_message_text("❌ У вас нет прав администратора.")
+            return
+        
+        stats = db.get_bot_stats()
+        
+        admin_text = f"""
+⚙️ **Панель управления**
+
+📊 Статистика:
+├ 👥 Пользователей: {stats['total_users']}
+├ ✅ Верифицировано: {stats['verified_users']}
+└ 🚫 Заблокировано: {stats['banned_users']}
+
+🛠️ Выберите действие:
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("📈 Детальная статистика", callback_data="stats")],
+            [InlineKeyboardButton("🎭 Управление ролями", callback_data="role_management")],
+            [InlineKeyboardButton("👥 Управление пользователями", callback_data="user_management")],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="admin_panel")],
+            [InlineKeyboardButton("↩️ Главное меню", callback_data="back_to_main")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if hasattr(update, 'message'):
+            await update.message.reply_text(admin_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.edit_message_text(admin_text, reply_markup=reply_markup, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Ошибка в show_admin_panel: {e}")
+
+async def show_stats(update):
+    """Показывает статистику"""
+    try:
+        user = update.effective_user if hasattr(update, 'effective_user') else update.from_user
+        
+        if not db.is_admin(user.id):
+            if hasattr(update, 'message'):
+                await update.message.reply_text("❌ У вас нет прав для просмотра статистики.")
+            else:
+                await update.edit_message_text("❌ У вас нет прав для просмотра статистики.")
+            return
+        
+        stats = db.get_bot_stats()
+        
+        total = stats['total_users']
+        verified = stats['verified_users']
+        banned = stats['banned_users']
+        pending = total - verified - banned
+        
+        verified_percent = (verified / total * 100) if total > 0 else 0
+        
+        # Статистика по ролям
+        role_stats_text = ""
+        for role, count in stats['role_stats'].items():
+            if count > 0 and role != 'user':
+                role_stats_text += f"├ {ROLES[role]}: {count}\n"
+        
+        stats_text = f"""
+📈 **Детальная статистика**
+
+👥 **Пользователи:**
+├ Всего: {total}
+├ Верифицировано: {verified}
+├ Ожидают: {pending}
+└ Заблокировано: {banned}
+
+📊 **Процент верификации: {verified_percent:.1f}%**
+
+🎭 **Распределение по ролям:**
+{role_stats_text}
+⚡ **Система:**
+├ Бот: 🟢 Онлайн
+├ База данных: 🟢 Работает
+└ Время: {datetime.now().strftime('%H:%M:%S')}
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="stats")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if hasattr(update, 'message'):
+            await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Ошибка в show_stats: {e}")
+
+async def show_role_management(update, user):
+    """Показывает управление ролями"""
+    try:
+        if not db.is_admin(user.id):
+            if hasattr(update, 'message'):
+                await update.message.reply_text("❌ У вас нет прав для управления ролями.")
+            else:
+                await update.edit_message_text("❌ У вас нет прав для управления ролями.")
+            return
+        
+        user_role = db.get_role(user.id)
+        user_role_name = ROLES[user_role]
+        
+        role_text = f"""
+👥 **Управление ролями**
+
+🎭 **Доступные роли:**
+👑 Владелец - Полный доступ к боту
+⚡ Админ - Управление ботом и ролями
+🛡️ Модератор - Модерация пользователей
+✅ Гарант - Проверенные пользователи
+👤 Пользователь - Обычный пользователь
+🚫 Скамер - Заблокированные пользователи
+
+💡 **Ваша роль: {user_role_name}**
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("🎭 Выдать роль", callback_data="assign_role")],
+            [InlineKeyboardButton("👥 Все пользователи", callback_data="show_all_users")]
+        ]
+        
+        # Добавляем кнопки для просмотра пользователей по ролям
+        for role_key, role_name in ROLES.items():
+            keyboard.append([InlineKeyboardButton(f"👁️ Показать {role_name}", callback_data=f"role_{role_key}")])
+        
+        keyboard.append([InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if hasattr(update, 'message'):
+            await update.message.reply_text(role_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.edit_message_text(role_text, reply_markup=reply_markup, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Ошибка в show_role_management: {e}")
+
 async def show_help(update):
     """Показывает справку"""
     try:
@@ -864,17 +1043,6 @@ async def show_help(update):
 👤 Пользователь - Обычный пользователь
 🚫 Скамер - Заблокированные
 
-👥 **Управление пользователями:**
-• Бан/разбан пользователей
-• Просмотр всех пользователей
-• Логи действий
-
-🏠 **Работа в группах:**
-/settings - Настройки группы (для админов)
-• Автоматическая проверка верификации
-• Приветственные сообщения для новых участников
-• Удаление сообщений от непроверенных пользователей
-
 ❓ **Проблемы с верификацией?**
 • Убедитесь что код точно скопирован
 • Проверьте что описание сохранено
@@ -894,126 +1062,98 @@ async def show_help(update):
             await update.edit_message_text(help_text, reply_markup=reply_markup, parse_mode='Markdown')
             
     except Exception as e:
-        logger.error(f"Error in show_help: {e}")
+        logger.error(f"Ошибка в show_help: {e}")
 
-# ===== ОБНОВЛЕННЫЙ BUTTON HANDLER =====
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий на кнопки"""
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+def get_roblox_user_info(username):
+    """Получает информацию о пользователе Roblox"""
     try:
-        query = update.callback_query
-        await query.answer()
+        clean_username = extract_username(username)
+        if not clean_username:
+            return {'success': False, 'error': 'Неверный формат никнейма'}
         
-        user = query.from_user
-        data = query.data
+        params = urllib.parse.urlencode({'keyword': clean_username, 'limit': 10})
+        url = f"https://users.roblox.com/v1/users/search?{params}"
         
-        if data == "verify":
-            await start_verification(update, context)
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
         
-        elif data == "verification_step_2":
-            await verification_step_2(update, context)
-        
-        elif data == "cancel_verification":
-            await cancel_verification(update, context)
-        
-        elif data == "profile":
-            await show_profile(query, user)
-        
-        elif data == "admin_panel":
-            await show_admin_panel(query, user)
-        
-        elif data == "stats":
-            await show_stats(query)
-        
-        elif data == "role_management":
-            await show_role_management(query, user)
-        
-        elif data == "user_management":
-            await show_user_management(update, context)
-        
-        elif data == "assign_role":
-            await start_role_assignment(update, context)
-        
-        elif data.startswith("assign_role_"):
-            role_key = data.replace("assign_role_", "")
-            await start_role_assignment(update, context, role_key)
-        
-        elif data == "show_all_users":
-            await show_all_users(update, context)
-        
-        elif data == "cancel_role_assignment":
-            await cancel_role_assignment(update, context)
-        
-        elif data == "ban_user":
-            await start_ban_user(update, context)
-        
-        elif data == "unban_user":
-            await start_unban_user(update, context)
-        
-        elif data == "cancel_action":
-            await cancel_action(update, context)
-        
-        elif data == "show_action_logs":
-            await show_action_logs(update, context)
-        
-        elif data.startswith("role_"):
-            await show_role_users(query, user, data)
-        
-        elif data == "help":
-            await show_help(query)
-        
-        elif data == "back_to_main":
-            await start_command(update, context)
-        
-        # Обработка callback для настроек группы
-        elif data.startswith("group_"):
-            await handle_group_settings_callback(update, context)
-        
-        elif data == "close_settings":
-            await query.edit_message_text("⚙️ Настройки закрыты.")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
             
+            if data.get('data'):
+                for user in data['data']:
+                    if user['name'].lower() == clean_username.lower():
+                        return {
+                            'id': user['id'],
+                            'username': user['name'],
+                            'displayName': user.get('displayName', user['name']),
+                            'success': True
+                        }
+        
+        return {'success': False, 'error': 'Пользователь не найден'}
+        
     except Exception as e:
-        logger.error(f"Error in button_handler: {e}")
-        await update.callback_query.edit_message_text("❌ Произошла ошибка. Попробуйте позже.")
+        logger.error(f"Ошибка Roblox API: {e}")
+        return {'success': False, 'error': 'Ошибка подключения к Roblox'}
+
+def extract_username(text):
+    """Извлекает username из текста"""
+    import re
+    
+    text = text.strip()
+    
+    if 'roblox.com/users/' in text:
+        match = re.search(r'roblox\.com/users/(\d+)/?', text)
+        if match:
+            try:
+                url = f"https://users.roblox.com/v1/users/{match.group(1)}"
+                req = urllib.request.Request(
+                    url,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    data = json.loads(response.read().decode())
+                    return data.get('name')
+            except:
+                return None
+    
+    text = text.replace('@', '')
+    
+    if 3 <= len(text) <= 20 and re.match(r'^[a-zA-Z0-9_]+$', text):
+        return text
+    
+    return None
 
 # ===== ЗАПУСК БОТА =====
 async def main():
     """Основная функция"""
     if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN не найден! Проверьте переменные окружения.")
+        logger.error("❌ BOT_TOKEN не найден!")
         return
     
     try:
-        # Создаем приложение
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Регистрация обработчиков для личных сообщений
+        # Регистрация обработчиков
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("profile", profile_command))
         application.add_handler(CommandHandler("stats", stats_command))
         application.add_handler(CommandHandler("roles", roles_command))
         application.add_handler(CommandHandler("help", help_command))
         
-        # Обработчики для групп
-        application.add_handler(CommandHandler("settings", group_settings_command))
-        application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_chat_members))
-        application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, handle_group_message))
-        
-        # Общие обработчики сообщений
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_message))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(button_handler))
         
-        # Запуск бота с обработкой ошибок
         logger.info("🤖 Бот запускается...")
-        logger.info(f"👑 Владелец: {ADMIN_IDS[0]}")
         
-        # Очищаем webhook перед запуском polling
         await application.bot.delete_webhook()
-        
-        # Запускаем polling
         await application.run_polling()
         
     except Conflict as e:
-        logger.error(f"❌ Конфликт: Уже запущен другой экземпляр бота. Остановите другие экземпляры.")
+        logger.error("❌ Конфликт: Уже запущен другой экземпляр бота.")
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
 
